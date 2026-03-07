@@ -1,6 +1,6 @@
 # Build output
-nnn
-nnn.exe
+/nnn
+/nnn.exe
 dist/
 
 # Test & coverage
