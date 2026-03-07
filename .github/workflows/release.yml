@@ -34,6 +34,7 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOTOOLCHAIN: local
           # Personal access token (classic) with repo scope on the
           # homebrew-tap repository. Add it as a repo secret named
           # HOMEBREW_TAP_GITHUB_TOKEN.

@@ -65,6 +65,7 @@ jobs:
           args: build --snapshot --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOTOOLCHAIN: local
 
       - name: Upload snapshot artifacts
         uses: actions/upload-artifact@v4
