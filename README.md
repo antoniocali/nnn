@@ -42,23 +42,6 @@ make install   # builds and copies to ~/.local/bin/nnn
 
 Run `nnn` with no arguments to open the interface.
 
-```
-┌─ nnn ──────────────────────────────────────────────────────────────────────┐
-│                                                                            │
-│  ╭─ Notes ─ 3 notes ──╮  ╭─────────────────────────────────────────────╮  │
-│  │ Notes        3     │  │ Meeting notes                               │  │
-│  │ ────────────────── │  │ #work #meetings                             │  │
-│  │ ⏺ Meeting notes    │  │ created Mar 07, 2026  · updated Mar 07, 2026│  │
-│  │   Ideas     Mar 07 │  │ ─────────────────────────────────────────── │  │
-│  │   First note Mar 07│  │ - Discussed Q1 roadmap                      │  │
-│  ╰────────────────────╯  │ - Assigned tasks to team                    │  │
-│                          │ - Follow up next week                       │  │
-│                          ╰─────────────────────────────────────────────╯  │
-│                                                                            │
-│  j/k nav · n new · e edit · d del · p pin · / search · ? help · q quit   │
-└────────────────────────────────────────────────────────────────────────────┘
-```
-
 ### Layout
 
 The screen is split into two panels:
@@ -148,6 +131,8 @@ Print all notes as a table. Pipe-friendly.
 ```sh
 nnn list
 nnn list --filter "meeting"
+nnn list --tag work
+nnn list --tag work,ideas
 nnn list --json
 nnn list --json | jq '.[].title'
 ```
@@ -155,6 +140,7 @@ nnn list --json | jq '.[].title'
 | Flag | Short | Description |
 |---|---|---|
 | `--filter` | `-f` | Case-insensitive substring filter on title and body |
+| `--tag` | | Filter by tag; repeatable or comma-separated (matches notes with **any** of the given tags) |
 | `--json` | | Output full notes as a JSON array |
 
 ### `nnn find`

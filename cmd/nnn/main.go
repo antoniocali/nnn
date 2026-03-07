@@ -113,6 +113,7 @@ Examples:
 func cmdList() *cobra.Command {
 	var outputJSON bool
 	var filter string
+	var tags []string
 
 	cmd := &cobra.Command{
 		Use:   "list",
@@ -122,7 +123,10 @@ func cmdList() *cobra.Command {
 Examples:
   nnn list
   nnn list --json
-  nnn list --filter "meeting"`,
+  nnn list --filter "meeting"
+  nnn list --tag work
+  nnn list --tag work,ideas
+  nnn list --tag work --tag ideas`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := storage.New()
 			if err != nil {
@@ -145,6 +149,27 @@ Examples:
 				ns = ns2
 			}
 
+			if len(tags) > 0 {
+				// Normalise: lowercase and trim spaces
+				wanted := make([]string, len(tags))
+				for i, t := range tags {
+					wanted[i] = strings.ToLower(strings.TrimSpace(t))
+				}
+				ns2 := ns[:0]
+				for _, n := range ns {
+					for _, w := range wanted {
+						for _, nt := range n.Tags {
+							if strings.ToLower(nt) == w {
+								ns2 = append(ns2, n)
+								goto next
+							}
+						}
+					}
+				next:
+				}
+				ns = ns2
+			}
+
 			if outputJSON {
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
@@ -153,17 +178,18 @@ Examples:
 
 			// Human-readable table
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tTITLE\tUPDATED\tPINNED")
-			fmt.Fprintln(w, "──\t─────\t───────\t──────")
+			fmt.Fprintln(w, "ID\tTITLE\tTAGS\tUPDATED\tPINNED")
+			fmt.Fprintln(w, "──\t─────\t────\t───────\t──────")
 			for _, n := range ns {
 				pin := ""
 				if n.Pinned {
 					pin = "⏺"
 				}
 				short := n.ID[:8]
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n",
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
 					short,
 					n.Title,
+					strings.Join(n.Tags, ", "),
 					n.UpdatedAt.Format("2006-01-02 15:04"),
 					pin,
 				)
@@ -174,6 +200,7 @@ Examples:
 
 	cmd.Flags().BoolVar(&outputJSON, "json", false, "Output as JSON")
 	cmd.Flags().StringVarP(&filter, "filter", "f", "", "Filter by title/body substring")
+	cmd.Flags().StringSliceVar(&tags, "tag", nil, "Filter by tag (repeatable; matches notes with any of the given tags)")
 	return cmd
 }
 
