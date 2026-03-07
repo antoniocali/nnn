@@ -10,7 +10,7 @@ before:
 
 builds:
   - id: nnn
-    main: ./cmd/nnn
+    main: ./cmd/nnn/
     binary: nnn
     env:
       - CGO_ENABLED=0
@@ -34,17 +34,17 @@ builds:
 
 archives:
   - id: nnn
-    builds: [nnn]
+    ids: [nnn]
     name_template: >-
       {{ .ProjectName }}_
       {{- .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "arm64" }}arm64
       {{- else }}{{ .Arch }}{{ end }}
-    format: tar.gz
+    formats: ['tar.gz']
     format_overrides:
       - goos: windows
-        format: zip
+        formats: ['zip']
     files:
       - README.md
       - LICENSE*
@@ -78,8 +78,8 @@ changelog:
       - "Merge branch"
       - "Merge pull request"
 
-# Homebrew tap — publishes Formula/nnn.rb to github.com/antoniocali/homebrew-tap
-brews:
+# Homebrew Cask — publishes Casks/nnn.rb to github.com/antoniocali/homebrew-tap
+homebrew_casks:
   - name: nnn
     repository:
       owner: antoniocali
@@ -89,19 +89,20 @@ brews:
     commit_author:
       name: goreleaserbot
       email: bot@goreleaser.com
-    commit_msg_template: "chore: brew formula update for {{ .ProjectName }} {{ .Tag }}"
-    directory: Formula
+    commit_msg_template: "chore: brew cask update for {{ .ProjectName }} {{ .Tag }}"
     homepage: "https://github.com/antoniocali/nnn"
     description: "A beautiful terminal note manager"
     license: MIT
     skip_upload: auto
-    dependencies:
-      - name: fzf
-        type: optional
-    install: |
-      bin.install "nnn"
-    test: |
-      system "#{bin}/nnn", "--version"
+    binaries:
+      - nnn
+    # Remove macOS quarantine bit since binary is not notarized
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/nnn"]
+          end
 
 # GitHub Releases
 release:
