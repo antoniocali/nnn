@@ -1,0 +1,128 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+project_name: nnn
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+
+builds:
+  - id: nnn
+    main: ./cmd/nnn
+    binary: nnn
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # No 386 — bubbletea targets modern terminals
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: nnn
+    builds: [nnn]
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Os }}_
+      {{- if eq .Arch "amd64" }}x86_64
+      {{- else if eq .Arch "arm64" }}arm64
+      {{- else }}{{ .Arch }}{{ end }}
+    format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - LICENSE*
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  abbrev: -1
+  groups:
+    - title: "New Features"
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: "Bug Fixes"
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: "Other"
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^ci:"
+      - "merge conflict"
+      - "Merge branch"
+      - "Merge pull request"
+
+# Homebrew tap — publishes Formula/nnn.rb to github.com/antoniocali/homebrew-tap
+brews:
+  - name: nnn
+    repository:
+      owner: antoniocali
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    commit_msg_template: "chore: brew formula update for {{ .ProjectName }} {{ .Tag }}"
+    directory: Formula
+    homepage: "https://github.com/antoniocali/nnn"
+    description: "A beautiful terminal note manager"
+    license: MIT
+    skip_upload: auto
+    dependencies:
+      - name: fzf
+        type: optional
+    install: |
+      bin.install "nnn"
+    test: |
+      system "#{bin}/nnn", "--version"
+
+# GitHub Releases
+release:
+  github:
+    owner: antoniocali
+    name: nnn
+  draft: false
+  prerelease: auto
+  name_template: "v{{.Version}}"
+  footer: |
+    ## Install
+
+    **Homebrew (macOS / Linux)**
+    ```sh
+    brew install antoniocali/tap/nnn
+    ```
+
+    **Direct download**
+    Download the archive for your platform from the assets above, extract, and place `nnn` somewhere on your `$PATH`.
+
+    **Go install**
+    ```sh
+    go install github.com/antoniocali/nnn/cmd/nnn@latest
+    ```

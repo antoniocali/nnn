@@ -1,0 +1,23 @@
+# Build output
+nnn
+nnn.exe
+dist/
+
+# Test & coverage
+coverage.out
+coverage.html
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

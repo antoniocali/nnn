@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write  # needed to create GitHub releases and upload assets
+  packages: write  # needed if you ever add Docker images
+
+jobs:
+  release:
+    name: GoReleaser
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so goreleaser can build the changelog
+
+      - name: Fetch all tags
+        run: git fetch --force --tags
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Personal access token (classic) with repo scope on the
+          # homebrew-tap repository. Add it as a repo secret named
+          # HOMEBREW_TAP_GITHUB_TOKEN.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
