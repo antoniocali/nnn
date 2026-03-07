@@ -1,5 +1,7 @@
 # nnn
 
+![demo](assets/demo.gif)
+
 A fast, keyboard-driven terminal note manager built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
 Two ways to use it: open the full TUI with `nnn`, or drive it from the command line for scripting and quick capture.
