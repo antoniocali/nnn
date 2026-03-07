@@ -10,7 +10,7 @@ before:
 
 builds:
   - id: nnn
-    main: ./cmd/nnn/
+    main: ./cmd/nnn
     binary: nnn
     env:
       - CGO_ENABLED=0
