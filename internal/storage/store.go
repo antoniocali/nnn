@@ -13,13 +13,20 @@ import (
 )
 
 const (
-	appName  = "nnn"
-	dataFile = "notes.json"
+	appName    = "nnn"
+	dataFile   = "notes.json"
+	configFile = "config.json"
 )
 
 // Store handles persisting notes to disk.
 type Store struct {
-	path string
+	path       string
+	configPath string
+}
+
+// Config holds user preferences persisted to config.json.
+type Config struct {
+	Theme string `json:"theme,omitempty"`
 }
 
 type storeData struct {
@@ -35,7 +42,39 @@ func New() (*Store, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create config dir: %w", err)
 	}
-	return &Store{path: filepath.Join(dir, dataFile)}, nil
+	return &Store{
+		path:       filepath.Join(dir, dataFile),
+		configPath: filepath.Join(dir, configFile),
+	}, nil
+}
+
+// LoadConfig reads config.json, returning a zero-value Config if the file
+// does not exist yet.
+func (s *Store) LoadConfig() (Config, error) {
+	data, err := os.ReadFile(s.configPath)
+	if os.IsNotExist(err) {
+		return Config{}, nil
+	}
+	if err != nil {
+		return Config{}, fmt.Errorf("read config file: %w", err)
+	}
+	var c Config
+	if err := json.Unmarshal(data, &c); err != nil {
+		return Config{}, fmt.Errorf("parse config file: %w", err)
+	}
+	return c, nil
+}
+
+// SaveConfig writes cfg to config.json, creating it if necessary.
+func (s *Store) SaveConfig(cfg Config) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.WriteFile(s.configPath, data, 0o644); err != nil {
+		return fmt.Errorf("write config file: %w", err)
+	}
+	return nil
 }
 
 // Load reads all notes from disk.

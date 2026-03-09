@@ -31,6 +31,7 @@ const (
 type errMsg struct{ err error }
 type savedMsg struct{}
 type statusClearMsg struct{}
+type saveConfigMsg struct{ theme string }
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -71,18 +72,34 @@ type Model struct {
 	statusMsg    string
 	statusIsErr  bool
 	statusTicker int
+
+	// theme
+	theme      Theme
+	themeIndex int // index into AllThemes for cycling
 }
 
-// New creates a fresh TUI model.
-func New(store *storage.Store) (Model, error) {
+// New creates a fresh TUI model using the given theme name.
+func New(store *storage.Store, themeName string) (Model, error) {
 	ns, err := store.Load()
 	if err != nil {
 		return Model{}, err
 	}
+
+	// Resolve theme index (defaults to 0 = amber)
+	idx := 0
+	for i, t := range AllThemes {
+		if t.Name == themeName {
+			idx = i
+			break
+		}
+	}
+
 	m := Model{
 		store:         store,
 		allNotes:      ns,
 		filteredNotes: ns,
+		theme:         AllThemes[idx],
+		themeIndex:    idx,
 	}
 	return m, nil
 }
@@ -113,6 +130,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusClearMsg:
 		m.statusMsg = ""
+		return m, nil
+
+	case saveConfigMsg:
+		_ = m.store.SaveConfig(storage.Config{Theme: msg.theme})
 		return m, nil
 
 	case tea.KeyMsg:
@@ -226,6 +247,16 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "ctrl+r", "r":
 		return m.reloadNotes()
+
+	case "T":
+		m.themeIndex = (m.themeIndex + 1) % len(AllThemes)
+		m.theme = AllThemes[m.themeIndex]
+		m.statusMsg = "Theme: " + m.theme.Name
+		m.statusIsErr = false
+		return m, tea.Batch(
+			clearStatusAfter(2*time.Second),
+			func() tea.Msg { return saveConfigMsg{theme: m.theme.Name} },
+		)
 	}
 	return m, nil
 }
@@ -283,6 +314,16 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case "?":
 		m.mode = modeHelp
+
+	case "T":
+		m.themeIndex = (m.themeIndex + 1) % len(AllThemes)
+		m.theme = AllThemes[m.themeIndex]
+		m.statusMsg = "Theme: " + m.theme.Name
+		m.statusIsErr = false
+		return m, tea.Batch(
+			clearStatusAfter(2*time.Second),
+			func() tea.Msg { return saveConfigMsg{theme: m.theme.Name} },
+		)
 	}
 	return m, nil
 }
@@ -574,24 +615,26 @@ func (m Model) View() string {
 }
 
 func (m Model) renderHeader() string {
-	logo := appHeaderStyle.Render("◆ nnn")
-	desc := appVersionStyle.Render("note manager")
-	sep := statusSepStyle.Render(" │ ")
-	mode := ""
+	th := m.theme
+	logo := th.AppHeader.Render("◆ nnn")
+	desc := th.AppVersion.Render("note manager")
+	sep := th.StatusSep.Render(" │ ")
+	modeStr := ""
 	switch m.mode {
 	case modeEdit:
-		mode = statusKeyStyle.Render(" EDIT")
+		modeStr = th.StatusKey.Render(" EDIT")
 	case modeNew:
-		mode = statusKeyStyle.Render(" NEW")
+		modeStr = th.StatusKey.Render(" NEW")
 	case modeSearch:
-		mode = searchActiveStyle.Render(" SEARCH: " + m.searchQuery + "█")
+		modeStr = th.SearchActive.Render(" SEARCH: " + m.searchQuery + "█")
 	case modeDelete:
-		mode = statusErrStyle.Render(" DELETE?")
+		modeStr = th.StatusErr.Render(" DELETE?")
 	}
-	return logo + sep + desc + mode
+	return logo + sep + desc + modeStr
 }
 
 func (m Model) renderList(w, h int) string {
+	th := m.theme
 	focused := m.mode == modeList || m.mode == modeSearch || m.mode == modeDelete
 
 	// Inner width for content (border takes 2 chars each side = 2 total per side)
@@ -605,48 +648,58 @@ func (m Model) renderList(w, h int) string {
 		countStr = fmt.Sprintf("%d/%d", len(m.filteredNotes), len(m.allNotes))
 	}
 	header := lipgloss.JoinHorizontal(lipgloss.Top,
-		listHeaderStyle.Render("Notes"),
+		th.ListHeader.Render("Notes"),
 		" ",
-		listCountStyle.Render(countStr),
+		th.ListCount.Render(countStr),
 	)
 	rows = append(rows, header)
-	rows = append(rows, listCountStyle.Render(strings.Repeat("─", innerW)))
+	rows = append(rows, th.ListCount.Render(strings.Repeat("─", innerW)))
 
 	if len(m.filteredNotes) == 0 {
-		rows = append(rows, emptyStyle.Width(innerW).Render("no notes"))
+		rows = append(rows, th.Empty.Width(innerW).Render("no notes"))
 	}
 
 	for i, n := range m.filteredNotes {
-		pin := listItemNormalMark.String()
+		pin := th.ListItemNormal.String()
 		if n.Pinned {
-			pin = listItemPinnedMark.String()
+			pin = th.ListItemPinned.String()
 		}
 		title := n.Title
 		if title == "" {
 			title = "(untitled)"
 		}
-		maxTitleW := innerW - 4
-		if utf8.RuneCountInString(title) > maxTitleW {
-			title = string([]rune(title)[:maxTitleW-1]) + "…"
-		}
 		date := n.UpdatedAt.Format("Jan 02")
+		dateRendered := th.ListCount.Render(date)
+		dateW := lipgloss.Width(dateRendered)
 
-		line := pin + title
-		meta := listCountStyle.Render(date)
-
-		// Pad line to fill width then add date
-		lineRunes := utf8.RuneCountInString(line)
-		dateRunes := utf8.RuneCountInString(date)
-		pad := innerW - lineRunes - dateRunes
-		if pad < 0 {
-			pad = 0
+		// innerW already excludes the 1-char left padding from the item style,
+		// but the item style's Padding(0,1) adds 1 on each side = 2 total.
+		// We work in the content width (innerW - 2 for item padding) so that
+		// when the full line is passed to the item style the date lands flush right.
+		contentW := innerW - 2 // account for Padding(0,1) on item styles
+		pinW := lipgloss.Width(pin)
+		maxTitleW := contentW - pinW - dateW
+		if maxTitleW < 1 {
+			maxTitleW = 1
 		}
-		fullLine := line + strings.Repeat(" ", pad) + meta
+		titleRunes := []rune(title)
+		if len(titleRunes) > maxTitleW {
+			titleRunes = append(titleRunes[:maxTitleW-1], '…')
+		}
+		title = string(titleRunes)
+
+		// Pad the title so date is always right-aligned.
+		titleW := utf8.RuneCountInString(title)
+		gap := contentW - pinW - titleW - dateW
+		if gap < 0 {
+			gap = 0
+		}
+		fullLine := pin + title + strings.Repeat(" ", gap) + dateRendered
 
 		if i == m.cursor {
-			rows = append(rows, listItemSelectedStyle.Width(innerW).Render(fullLine))
+			rows = append(rows, th.ListItemSelected.Width(innerW).Render(fullLine))
 		} else {
-			rows = append(rows, listItemStyle.Width(innerW).Render(fullLine))
+			rows = append(rows, th.ListItem.Width(innerW).Render(fullLine))
 		}
 	}
 
@@ -675,12 +728,13 @@ func (m Model) renderList(w, h int) string {
 	content = strings.Join(lines, "\n")
 
 	if focused {
-		return listPanelFocStyle.Width(w).Height(h).Render(content)
+		return th.ListPanelFoc.Width(w).Height(h).Render(content)
 	}
-	return listPanelStyle.Width(w).Height(h).Render(content)
+	return th.ListPanel.Width(w).Height(h).Render(content)
 }
 
 func (m Model) renderDetail(w, h int) string {
+	th := m.theme
 	focused := m.mode == modeDetail
 
 	innerW := w - 4
@@ -690,9 +744,9 @@ func (m Model) renderDetail(w, h int) string {
 	}
 
 	if len(m.filteredNotes) == 0 {
-		content := emptyStyle.Width(innerW).Height(h).
+		content := th.Empty.Width(innerW).Height(h).
 			Render("No notes yet.\nPress  n  to create one.")
-		return detailPanelStyle.Width(w).Height(h).Render(content)
+		return th.DetailPanel.Width(w).Height(h).Render(content)
 	}
 
 	n := m.filteredNotes[m.cursor]
@@ -704,13 +758,13 @@ func (m Model) renderDetail(w, h int) string {
 	if titleText == "" {
 		titleText = "(untitled)"
 	}
-	parts = append(parts, detailTitleStyle.Width(innerW).Render(titleText))
+	parts = append(parts, th.DetailTitle.Width(innerW).Render(titleText))
 
 	// Tags
 	if len(n.Tags) > 0 {
 		var tagChips []string
 		for _, t := range n.Tags {
-			tagChips = append(tagChips, tagStyle.Render("#"+t))
+			tagChips = append(tagChips, th.Tag.Render("#"+t))
 		}
 		parts = append(parts, lipgloss.JoinHorizontal(lipgloss.Top, tagChips...))
 	}
@@ -718,22 +772,22 @@ func (m Model) renderDetail(w, h int) string {
 	// Meta
 	created := n.CreatedAt.Format("Jan 02, 2006 15:04")
 	updated := n.UpdatedAt.Format("Jan 02, 2006 15:04")
-	metaLine := detailMetaStyle.Render(fmt.Sprintf("created %s  ·  updated %s", created, updated))
+	metaLine := th.DetailMeta.Render(fmt.Sprintf("created %s  ·  updated %s", created, updated))
 	if n.Pinned {
 		metaLine = lipgloss.JoinHorizontal(lipgloss.Top,
-			listItemPinnedMark.String()+" ",
+			th.ListItemPinned.String()+" ",
 			metaLine,
 		)
 	}
 	parts = append(parts, metaLine)
-	parts = append(parts, detailMetaStyle.Render(strings.Repeat("─", innerW)))
+	parts = append(parts, th.DetailMeta.Render(strings.Repeat("─", innerW)))
 
 	// Body
 	body := n.Body
 	if body == "" {
 		body = "(empty)"
 	}
-	parts = append(parts, detailBodyStyle.Width(innerW).Render(body))
+	parts = append(parts, th.DetailBody.Width(innerW).Render(body))
 
 	content := strings.Join(parts, "\n")
 
@@ -753,12 +807,13 @@ func (m Model) renderDetail(w, h int) string {
 	visible := strings.Join(lines[off:end], "\n")
 
 	if focused {
-		return detailPanelFocStyle.Width(w).Height(h).Render(visible)
+		return th.DetailPanelFoc.Width(w).Height(h).Render(visible)
 	}
-	return detailPanelStyle.Width(w).Height(h).Render(visible)
+	return th.DetailPanel.Width(w).Height(h).Render(visible)
 }
 
 func (m Model) renderEditor(w, h int) string {
+	th := m.theme
 	innerW := w - 4
 
 	// ── helper: render a field with cursor if active ───────────────────────
@@ -767,7 +822,7 @@ func (m Model) renderEditor(w, h int) string {
 		if m.editField != fieldIdx {
 			s := string(runes)
 			if s == "" {
-				return detailMetaStyle.Render(placeholder)
+				return th.DetailMeta.Render(placeholder)
 			}
 			return s
 		}
@@ -777,11 +832,11 @@ func (m Model) renderEditor(w, h int) string {
 		}
 		before := string(runes[:pos])
 		if pos < len(runes) {
-			cur := cursorStyle.Render(string(runes[pos]))
+			cur := th.Cursor.Render(string(runes[pos]))
 			after := string(runes[pos+1:])
 			return before + cur + after
 		}
-		return before + cursorStyle.Render(" ")
+		return before + th.Cursor.Render(" ")
 	}
 
 	// ── fields ────────────────────────────────────────────────────────────
@@ -789,25 +844,25 @@ func (m Model) renderEditor(w, h int) string {
 	bodyActive := m.editField == 1
 	tagsActive := m.editField == 2
 
-	labelTitle := editorTitleLabelStyle.Render("Title")
-	labelBody := editorBodyLabelStyle.Render("Body ")
-	labelTags := editorBodyLabelStyle.Render("Tags ")
+	labelTitle := th.EditorTitleLabel.Render("Title")
+	labelBody := th.EditorBodyLabel.Render("Body ")
+	labelTags := th.EditorBodyLabel.Render("Tags ")
 	if titleActive {
-		labelTitle = editorTitleLabelStyle.Render("Title")
+		labelTitle = th.EditorTitleLabel.Render("Title")
 	}
 	if bodyActive {
-		labelBody = editorTitleLabelStyle.Render("Body ")
+		labelBody = th.EditorTitleLabel.Render("Body ")
 	}
 	if tagsActive {
-		labelTags = editorTitleLabelStyle.Render("Tags ")
+		labelTags = th.EditorTitleLabel.Render("Tags ")
 	}
 
 	titleStr := renderField(m.editTitle, 0, "(title)")
 	bodyStr := renderField(m.editBody, 1, "(body)")
 	tagsStr := renderField(m.editTags, 2, "(comma-separated, e.g. work, ideas)")
 
-	sep := detailMetaStyle.Render(strings.Repeat("─", innerW))
-	hint := detailMetaStyle.Render("tab: next field  ·  ctrl+s: save  ·  ctrl+w: save & view  ·  esc: cancel")
+	sep := th.DetailMeta.Render(strings.Repeat("─", innerW))
+	hint := th.DetailMeta.Render("tab: next field  ·  ctrl+s: save  ·  ctrl+w: save & view  ·  esc: cancel")
 
 	titleLine := lipgloss.JoinHorizontal(lipgloss.Top, labelTitle, ": ", titleStr)
 	tagsLine := lipgloss.JoinHorizontal(lipgloss.Top, labelTags, ": ", tagsStr)
@@ -823,63 +878,67 @@ func (m Model) renderEditor(w, h int) string {
 		hint,
 	}, "\n")
 
-	return editorPanelStyle.Width(w).Height(h).Render(content)
+	return th.EditorPanel.Width(w).Height(h).Render(content)
 }
 
 func (m Model) renderStatus() string {
+	th := m.theme
 	if m.statusMsg != "" {
 		if m.statusIsErr {
-			return statusErrStyle.Render("✗ " + m.statusMsg)
+			return th.StatusErr.Render("✗ " + m.statusMsg)
 		}
-		return statusMsgStyle.Render("✓ " + m.statusMsg)
+		return th.StatusMsg.Render("✓ " + m.statusMsg)
 	}
 
-	sep := statusSepStyle.Render(" · ")
+	sep := th.StatusSep.Render(" · ")
 
 	switch m.mode {
 	case modeList:
 		keys := []string{
-			statusKeyStyle.Render("j/k") + " nav",
-			statusKeyStyle.Render("n") + " new",
-			statusKeyStyle.Render("e") + " edit",
-			statusKeyStyle.Render("d") + " del",
-			statusKeyStyle.Render("p") + " pin",
-			statusKeyStyle.Render("/") + " search",
-			statusKeyStyle.Render("?") + " help",
-			statusKeyStyle.Render("q") + " quit",
+			th.StatusKey.Render("j/k") + " nav",
+			th.StatusKey.Render("n") + " new",
+			th.StatusKey.Render("e") + " edit",
+			th.StatusKey.Render("d") + " del",
+			th.StatusKey.Render("p") + " pin",
+			th.StatusKey.Render("/") + " search",
+			th.StatusKey.Render("T") + " theme",
+			th.StatusKey.Render("?") + " help",
+			th.StatusKey.Render("q") + " quit",
 		}
-		return statusBarStyle.Render(strings.Join(keys, sep))
+		return th.StatusBar.Render(strings.Join(keys, sep))
 	case modeDetail:
 		keys := []string{
-			statusKeyStyle.Render("j/k") + " scroll",
-			statusKeyStyle.Render("e") + " edit",
-			statusKeyStyle.Render("d") + " del",
-			statusKeyStyle.Render("esc/h") + " back",
+			th.StatusKey.Render("j/k") + " scroll",
+			th.StatusKey.Render("e") + " edit",
+			th.StatusKey.Render("d") + " del",
+			th.StatusKey.Render("T") + " theme",
+			th.StatusKey.Render("esc/h") + " back",
 		}
-		return statusBarStyle.Render(strings.Join(keys, sep))
+		return th.StatusBar.Render(strings.Join(keys, sep))
 	case modeEdit, modeNew:
 		fieldName := []string{"title", "body", "tags"}[m.editField]
 		keys := []string{
-			statusKeyStyle.Render("tab") + " next field",
-			statusKeyStyle.Render("ctrl+s") + " save",
-			statusKeyStyle.Render("esc") + " cancel",
-			detailMetaStyle.Render("editing: ") + statusKeyStyle.Render(fieldName),
+			th.StatusKey.Render("tab") + " next field",
+			th.StatusKey.Render("ctrl+s") + " save",
+			th.StatusKey.Render("esc") + " cancel",
+			th.DetailMeta.Render("editing: ") + th.StatusKey.Render(fieldName),
 		}
-		return statusBarStyle.Render(strings.Join(keys, sep))
+		return th.StatusBar.Render(strings.Join(keys, sep))
 	case modeSearch:
-		return searchActiveStyle.Render("  Searching: " + m.searchQuery + "█  ·  enter/esc to confirm")
+		return th.SearchActive.Render("  Searching: " + m.searchQuery + "█  ·  enter/esc to confirm")
 	case modeDelete:
 		n := m.filteredNotes[m.cursor]
 		title := n.Title
 		if title == "" {
 			title = "(untitled)"
 		}
-		return statusErrStyle.Render(fmt.Sprintf("  Delete \"%s\"? y/n", title))
+		return th.StatusErr.Render(fmt.Sprintf("  Delete \"%s\"? y/n", title))
 	}
 	return ""
 }
 
 func (m Model) renderHelp() string {
+	th := m.theme
 	type binding struct{ key, desc string }
 	sections := []struct {
 		header   string
@@ -914,6 +973,7 @@ func (m Model) renderHelp() string {
 			{"Esc", "Cancel edit"},
 		}},
 		{"App", []binding{
+			{"T", "Cycle theme (" + m.theme.Name + ")"},
 			{"?", "Toggle help"},
 			{"q / Ctrl+C", "Quit"},
 		}},
@@ -921,18 +981,18 @@ func (m Model) renderHelp() string {
 
 	// Build all content lines (unstyled box, just the inner rows)
 	var rows []string
-	rows = append(rows, helpTitleStyle.Render("◆ nnn keyboard shortcuts"), "")
+	rows = append(rows, th.HelpTitle.Render("◆ nnn keyboard shortcuts"), "")
 	for _, sec := range sections {
-		rows = append(rows, helpTitleStyle.Render(sec.header))
+		rows = append(rows, th.HelpTitle.Render(sec.header))
 		for _, b := range sec.bindings {
 			rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top,
-				helpKeyStyle.Render(b.key),
-				helpDescStyle.Render(b.desc),
+				th.HelpKey.Render(b.key),
+				th.HelpDesc.Render(b.desc),
 			))
 		}
 		rows = append(rows, "")
 	}
-	rows = append(rows, detailMetaStyle.Render("j/k: scroll  ·  g/G: top/bottom  ·  esc/?/q: close"))
+	rows = append(rows, th.DetailMeta.Render("j/k: scroll  ·  g/G: top/bottom  ·  esc/?/q: close"))
 
 	totalRows := len(rows)
 
@@ -971,7 +1031,7 @@ func (m Model) renderHelp() string {
 	// Add a scroll indicator in the top-right corner of the title line when
 	// the content is taller than the viewport.
 	if totalRows > visible {
-		indicator := detailMetaStyle.Render(fmt.Sprintf("%d%%", (off+1)*100/totalRows))
+		indicator := th.DetailMeta.Render(fmt.Sprintf("%d%%", (off+1)*100/totalRows))
 		titleRow := slice[0]
 		pad := m.width - 6 - lipgloss.Width(titleRow) - lipgloss.Width(indicator)
 		if pad > 0 {
@@ -980,7 +1040,7 @@ func (m Model) renderHelp() string {
 	}
 
 	content := strings.Join(slice, "\n")
-	return helpOverlayStyle.Width(m.width - 2).Height(m.height - 2).Render(content)
+	return th.HelpOverlay.Width(m.width - 2).Height(m.height - 2).Render(content)
 }
 
 func max(a, b int) int {
