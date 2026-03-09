@@ -40,7 +40,13 @@ make install   # builds and copies to ~/.local/bin/nnn
 
 ## TUI
 
-Run `nnn` with no arguments to open the interface.
+Run `nnn` with no arguments to open the interface. Pass `--theme` to choose a color theme at launch, or press `T` inside the TUI to cycle through themes live.
+
+```sh
+nnn
+nnn --theme dracula
+nnn -t tokyo-night
+```
 
 ### Layout
 
@@ -100,8 +106,27 @@ Search matches against both title and body (case-insensitive).
 
 | Key | Action |
 |---|---|
+| `T` | Cycle through themes |
 | `?` | Toggle help overlay (scrollable with `j`/`k`) |
 | `q` / `Ctrl+C` | Quit |
+
+---
+
+## Themes
+
+nnn ships with 7 built-in themes.
+
+| Name | Description |
+|---|---|
+| `amber` | Dark with warm amber accents (default) |
+| `catppuccin` | Catppuccin Mocha — warm dark with pastel purples and pinks |
+| `tokyo-night` | Cool blue/purple dark |
+| `gruvbox` | Retro warm earth tones |
+| `nord` | Arctic bluish dark with cool pale colors |
+| `solarized` | Light background with warm and cool accents |
+| `dracula` | Dark with vibrant purple and pink accents |
+
+Set a theme at launch with `--theme` / `-t`, or press `T` inside the TUI to cycle through them. The chosen theme is saved automatically to `~/.config/nnn/config.json` and restored on the next launch. The `--theme` flag always takes precedence over the saved value.
 
 ---
 
@@ -193,14 +218,14 @@ nnn path
 
 ## Data storage
 
-Notes are stored as a single JSON file on disk.
+Notes and configuration are stored as JSON files on disk.
 
-| Platform | Path |
-|---|---|
-| macOS / Linux | `~/.config/nnn/notes.json` |
-| Windows | `%AppData%\nnn\notes.json` |
+| Platform | Notes | Config |
+|---|---|---|
+| macOS / Linux | `~/.config/nnn/notes.json` | `~/.config/nnn/config.json` |
+| Windows | `%AppData%\nnn\notes.json` | `%AppData%\nnn\config.json` |
 
-The file is human-readable and easy to back up, sync with git, or process with `jq`.
+Both files are human-readable and easy to back up, sync with git, or process with `jq`.
 
 ```jsonc
 {
