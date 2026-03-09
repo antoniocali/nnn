@@ -22,15 +22,20 @@ var (
 )
 
 func main() {
+	var themeName string
+
 	root := &cobra.Command{
 		Use:     "nnn",
 		Short:   "A beautiful terminal note manager",
 		Version: version,
 		// Running nnn with no subcommand opens the TUI
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTUI()
+			return runTUI(themeName)
 		},
 	}
+
+	root.Flags().StringVarP(&themeName, "theme", "t", "",
+		"Color theme: amber, catppuccin, tokyo-night, gruvbox, nord, solarized, dracula")
 
 	root.AddCommand(cmdCreate())
 	root.AddCommand(cmdList())
@@ -46,12 +51,23 @@ func main() {
 
 // ── TUI ───────────────────────────────────────────────────────────────────────
 
-func runTUI() error {
+func runTUI(themeFlag string) error {
 	store, err := storage.New()
 	if err != nil {
 		return fmt.Errorf("init storage: %w", err)
 	}
-	m, err := tui.New(store)
+
+	// Resolve theme: CLI flag > config.json > default (amber)
+	themeName := themeFlag
+	if themeName == "" {
+		cfg, err := store.LoadConfig()
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		themeName = cfg.Theme
+	}
+
+	m, err := tui.New(store, themeName)
 	if err != nil {
 		return fmt.Errorf("init tui: %w", err)
 	}
