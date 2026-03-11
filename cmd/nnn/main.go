@@ -11,6 +11,7 @@ import (
 
 	"github.com/antoniocali/nnn/internal/storage"
 	"github.com/antoniocali/nnn/internal/tui"
+	"github.com/antoniocali/nnn/internal/updater"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
@@ -24,25 +25,39 @@ var (
 func main() {
 	var themeName string
 
+	store, err := storage.New()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "nnn: init storage: %v\n", err)
+		os.Exit(1)
+	}
+
 	root := &cobra.Command{
 		Use:     "nnn",
 		Short:   "A beautiful terminal note manager",
 		Version: version,
 		// Running nnn with no subcommand opens the TUI
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTUI(themeName)
+			return runTUI(store, themeName)
+		},
+		// After every command (TUI or any subcommand) check for updates and
+		// print a notice if a newer version is available.
+		PersistentPostRun: func(cmd *cobra.Command, args []string) {
+			result := updater.Check(store, version)
+			if result.UpdateAvailable {
+				printUpdateNotice(result)
+			}
 		},
 	}
 
 	root.Flags().StringVarP(&themeName, "theme", "t", "",
 		"Color theme: amber, catppuccin, tokyo-night, gruvbox, nord, solarized, dracula")
 
-	root.AddCommand(cmdCreate())
-	root.AddCommand(cmdList())
-	root.AddCommand(cmdFind())
-	root.AddCommand(cmdDelete())
-	root.AddCommand(cmdPurge())
-	root.AddCommand(cmdPath())
+	root.AddCommand(cmdCreate(store))
+	root.AddCommand(cmdList(store))
+	root.AddCommand(cmdFind(store))
+	root.AddCommand(cmdDelete(store))
+	root.AddCommand(cmdPurge(store))
+	root.AddCommand(cmdPath(store))
 
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
@@ -51,12 +66,7 @@ func main() {
 
 // ── TUI ───────────────────────────────────────────────────────────────────────
 
-func runTUI(themeFlag string) error {
-	store, err := storage.New()
-	if err != nil {
-		return fmt.Errorf("init storage: %w", err)
-	}
-
+func runTUI(store *storage.Store, themeFlag string) error {
 	// Resolve theme: CLI flag > config.json > default (amber)
 	themeName := themeFlag
 	if themeName == "" {
@@ -75,13 +85,20 @@ func runTUI(themeFlag string) error {
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
+
 	_, err = p.Run()
 	return err
 }
 
+// printUpdateNotice writes a short update banner to stderr.
+func printUpdateNotice(r updater.Result) {
+	fmt.Fprintf(os.Stderr, "\n  nnn update available: %s -> %s\n  Run: brew upgrade antoniocali/tap/nnn\n\n",
+		r.CurrentVersion, r.LatestVersion)
+}
+
 // ── create ────────────────────────────────────────────────────────────────────
 
-func cmdCreate() *cobra.Command {
+func cmdCreate(store *storage.Store) *cobra.Command {
 	var body string
 	var tags []string
 
@@ -96,10 +113,6 @@ Examples:
   nnn create "Idea" --tags work,ideas`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := storage.New()
-			if err != nil {
-				return err
-			}
 			title := ""
 			if len(args) > 0 {
 				title = args[0]
@@ -126,7 +139,7 @@ Examples:
 
 // ── list ──────────────────────────────────────────────────────────────────────
 
-func cmdList() *cobra.Command {
+func cmdList(store *storage.Store) *cobra.Command {
 	var outputJSON bool
 	var filter string
 	var tags []string
@@ -144,10 +157,6 @@ Examples:
   nnn list --tag work,ideas
   nnn list --tag work --tag ideas`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := storage.New()
-			if err != nil {
-				return err
-			}
 			ns, err := store.Load()
 			if err != nil {
 				return err
@@ -222,7 +231,7 @@ Examples:
 
 // ── find ──────────────────────────────────────────────────────────────────────
 
-func cmdFind() *cobra.Command {
+func cmdFind(store *storage.Store) *cobra.Command {
 	return &cobra.Command{
 		Use:   "find",
 		Short: "Search notes interactively with fzf",
@@ -236,10 +245,6 @@ The selected note body is printed to stdout.`,
 				return fmt.Errorf("fzf not found in PATH — install it first: https://github.com/junegunn/fzf")
 			}
 
-			store, err := storage.New()
-			if err != nil {
-				return err
-			}
 			ns, err := store.Load()
 			if err != nil {
 				return err
@@ -309,7 +314,7 @@ The selected note body is printed to stdout.`,
 
 // ── delete ────────────────────────────────────────────────────────────────────
 
-func cmdDelete() *cobra.Command {
+func cmdDelete(store *storage.Store) *cobra.Command {
 	var force bool
 
 	cmd := &cobra.Command{
@@ -322,10 +327,6 @@ Examples:
   nnn delete abc12345 --force`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := storage.New()
-			if err != nil {
-				return err
-			}
 			ns, err := store.Load()
 			if err != nil {
 				return err
@@ -367,15 +368,11 @@ Examples:
 
 // ── path ──────────────────────────────────────────────────────────────────────
 
-func cmdPath() *cobra.Command {
+func cmdPath(store *storage.Store) *cobra.Command {
 	return &cobra.Command{
 		Use:   "path",
 		Short: "Print the path to the notes file",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := storage.New()
-			if err != nil {
-				return err
-			}
 			fmt.Println(store.Path())
 			return nil
 		},
@@ -384,7 +381,7 @@ func cmdPath() *cobra.Command {
 
 // ── purge ─────────────────────────────────────────────────────────────────────
 
-func cmdPurge() *cobra.Command {
+func cmdPurge(store *storage.Store) *cobra.Command {
 	var force bool
 
 	return &cobra.Command{
@@ -397,11 +394,6 @@ Examples:
   nnn purge
   nnn purge --force`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := storage.New()
-			if err != nil {
-				return err
-			}
-
 			if !force {
 				fmt.Printf("This will permanently delete %s\nAre you sure? [y/N] ", store.Path())
 				var ans string

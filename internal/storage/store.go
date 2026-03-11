@@ -26,7 +26,9 @@ type Store struct {
 
 // Config holds user preferences persisted to config.json.
 type Config struct {
-	Theme string `json:"theme,omitempty"`
+	Theme           string    `json:"theme,omitempty"`
+	LastUpdateCheck time.Time `json:"last_update_check,omitempty"`
+	LatestVersion   string    `json:"latest_version,omitempty"`
 }
 
 type storeData struct {
