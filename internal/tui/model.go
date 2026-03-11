@@ -133,7 +133,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case saveConfigMsg:
-		_ = m.store.SaveConfig(storage.Config{Theme: msg.theme})
+		if cfg, err := m.store.LoadConfig(); err == nil {
+			cfg.Theme = msg.theme
+			_ = m.store.SaveConfig(cfg)
+		}
 		return m, nil
 
 	case tea.KeyMsg:
