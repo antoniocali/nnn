@@ -77,7 +77,7 @@ func runTUI(store *storage.Store, themeFlag string) error {
 		themeName = cfg.Theme
 	}
 
-	m, err := tui.New(store, themeName)
+	m, err := tui.New(store, themeName, version)
 	if err != nil {
 		return fmt.Errorf("init tui: %w", err)
 	}
