@@ -76,10 +76,13 @@ type Model struct {
 	// theme
 	theme      Theme
 	themeIndex int // index into AllThemes for cycling
+
+	// version string (injected at build time via ldflags)
+	version string
 }
 
-// New creates a fresh TUI model using the given theme name.
-func New(store *storage.Store, themeName string) (Model, error) {
+// New creates a fresh TUI model using the given theme name and version string.
+func New(store *storage.Store, themeName string, version string) (Model, error) {
 	ns, err := store.Load()
 	if err != nil {
 		return Model{}, err
@@ -100,6 +103,7 @@ func New(store *storage.Store, themeName string) (Model, error) {
 		filteredNotes: ns,
 		theme:         AllThemes[idx],
 		themeIndex:    idx,
+		version:       version,
 	}
 	return m, nil
 }
@@ -620,7 +624,7 @@ func (m Model) View() string {
 func (m Model) renderHeader() string {
 	th := m.theme
 	logo := th.AppHeader.Render("◆ nnn")
-	desc := th.AppVersion.Render("note manager")
+	desc := th.AppVersion.Render("an elegant TUI note manager")
 	sep := th.StatusSep.Render(" │ ")
 	modeStr := ""
 	switch m.mode {
@@ -633,7 +637,26 @@ func (m Model) renderHeader() string {
 	case modeDelete:
 		modeStr = th.StatusErr.Render(" DELETE?")
 	}
-	return logo + sep + desc + modeStr
+
+	left := logo + sep + desc + modeStr
+
+	// Right side: version and active theme name
+	ver := strings.TrimPrefix(m.version, "v")
+	if ver == "" {
+		ver = "dev"
+	}
+	rightStr := th.AppVersion.Render("v"+ver) +
+		th.StatusSep.Render(" │ ") +
+		th.AppHeader.Render(m.theme.Name)
+
+	// Pad left side to push right side to the terminal edge
+	leftLen := lipgloss.Width(left)
+	rightLen := lipgloss.Width(rightStr)
+	gap := m.width - leftLen - rightLen
+	if gap < 1 {
+		gap = 1
+	}
+	return left + strings.Repeat(" ", gap) + rightStr
 }
 
 func (m Model) renderList(w, h int) string {
