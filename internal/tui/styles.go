@@ -179,15 +179,13 @@ func newTheme(name string, p palette) Theme {
 		HelpOverlay: lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(p.accent).
-			Background(p.surface).
 			Padding(0, 3),
 		HelpTitle: lipgloss.NewStyle().
 			Foreground(p.accent).
 			Bold(true),
 		HelpKey: lipgloss.NewStyle().
 			Foreground(p.selectedFg).
-			Bold(true).
-			Width(14),
+			Bold(true),
 		HelpDesc: lipgloss.NewStyle().
 			Foreground(p.text),
 

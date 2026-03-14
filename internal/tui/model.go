@@ -844,11 +844,6 @@ func (m Model) View() string {
 		return ""
 	}
 
-	// Help overlay shortcircuit
-	if m.mode == modeHelp {
-		return m.renderHelp()
-	}
-
 	// Heights
 	headerH := 1
 	statusH := 1
@@ -865,11 +860,22 @@ func (m Model) View() string {
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, listPanel, " ", detailPanel)
 
-	return lipgloss.JoinVertical(lipgloss.Left,
+	bg := lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		body,
 		status,
 	)
+
+	// Help overlay: render dialog and place it centered over the background.
+	if m.mode == modeHelp {
+		dialog := m.renderHelp()
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			dialog,
+		)
+	}
+
+	return bg
 }
 
 func (m Model) renderHeader() string {
@@ -1226,6 +1232,34 @@ func (m Model) renderStatus() string {
 
 func (m Model) renderHelp() string {
 	th := m.theme
+
+	// ── Dialog dimensions (capped so it floats, not full-screen) ─────────────
+	dialogW := m.width - 8
+	if dialogW > 110 {
+		dialogW = 110
+	}
+	if dialogW < 30 {
+		dialogW = 30
+	}
+	dialogH := m.height - 6
+	if dialogH > 42 {
+		dialogH = 42
+	}
+	if dialogH < 10 {
+		dialogH = 10
+	}
+
+	// ── Total inner width available (overlay has 2-char border + 3 padding each side = 8) ─
+	innerW := dialogW - 8
+	if innerW < 20 {
+		innerW = 20
+	}
+	sepW := 1
+	halfW := (innerW - sepW) / 2
+	leftW := halfW
+	rightW := innerW - sepW - leftW
+
+	// ── Left column: keyboard shortcuts ──────────────────────────────────────
 	type binding struct{ key, desc string }
 	sections := []struct {
 		header   string
@@ -1266,36 +1300,146 @@ func (m Model) renderHelp() string {
 		}},
 	}
 
-	// Build all content lines (unstyled box, just the inner rows)
-	var rows []string
-	helpTitle := "◆ nnn keyboard shortcuts"
-	if m.email != "" {
-		helpTitle = "◆ nnn.rocks keyboard shortcuts"
-	}
-	rows = append(rows, th.HelpTitle.Render(helpTitle), "")
+	const keyColW = 16 // fixed width for the key column in shortcut rows
+
+	var leftRows []string
+	leftRows = append(leftRows, th.HelpTitle.Render("Keyboard shortcuts"), "")
 	for _, sec := range sections {
-		rows = append(rows, th.HelpTitle.Render(sec.header))
+		leftRows = append(leftRows, th.HelpTitle.Render(sec.header))
 		for _, b := range sec.bindings {
-			rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top,
-				th.HelpKey.Render(b.key),
-				th.HelpDesc.Render(b.desc),
-			))
+			keyRendered := th.HelpKey.Render(b.key)
+			// Pad the key cell to keyColW so descriptions align regardless of key length.
+			pad := keyColW - lipgloss.Width(keyRendered)
+			if pad < 1 {
+				pad = 1
+			}
+			leftRows = append(leftRows, keyRendered+strings.Repeat(" ", pad)+th.HelpDesc.Render(b.desc))
 		}
-		rows = append(rows, "")
+		leftRows = append(leftRows, "")
 	}
+
+	// ── Right column: about ───────────────────────────────────────────────────
+	sep := th.DetailMeta.Render("│")
+
+	// wordWrap wraps text to fit within w runes, returning one string per line.
+	wordWrap := func(text string, w int) []string {
+		if w < 1 {
+			return []string{text}
+		}
+		var lines []string
+		for _, paragraph := range strings.Split(text, "\n") {
+			words := strings.Fields(paragraph)
+			if len(words) == 0 {
+				lines = append(lines, "")
+				continue
+			}
+			line := ""
+			for _, word := range words {
+				if line == "" {
+					line = word
+				} else if utf8.RuneCountInString(line)+1+utf8.RuneCountInString(word) <= w {
+					line += " " + word
+				} else {
+					lines = append(lines, line)
+					line = word
+				}
+			}
+			if line != "" {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+
+	wrapW := rightW - 2 // leave a little breathing room
+	if wrapW < 10 {
+		wrapW = 10
+	}
+
+	var rightRows []string
+	rightRows = append(rightRows, th.HelpTitle.Render("About nnn"), "")
+
+	about := "nnn is a keyboard-driven TUI for managing notes in the terminal — built with Bubble Tea and lipgloss, because plain text and fast navigation are all you really need."
+	for _, l := range wordWrap(about, wrapW) {
+		rightRows = append(rightRows, th.HelpDesc.Render(l))
+	}
+	rightRows = append(rightRows, "", "")
+
+	cloud := "Notes can be synced to nnn.rocks, a hosted backend that keeps your notes in sync across devices and machines."
+	for _, l := range wordWrap(cloud, wrapW) {
+		rightRows = append(rightRows, th.HelpDesc.Render(l))
+	}
+	rightRows = append(rightRows, "", "")
+
+	if m.email != "" {
+		rightRows = append(rightRows, th.HelpTitle.Render("Cloud sync"), "")
+		rightRows = append(rightRows, th.HelpDesc.Render("Signed in as:"))
+		rightRows = append(rightRows, th.HelpKey.Render(m.email))
+		rightRows = append(rightRows, "")
+		for _, l := range wordWrap("Notes sync automatically on startup. Every edit, create, delete, and pin change is pushed in the background.", wrapW) {
+			rightRows = append(rightRows, th.HelpDesc.Render(l))
+		}
+	} else {
+		rightRows = append(rightRows, th.HelpTitle.Render("Cloud sync"), "")
+		for _, l := range wordWrap("Sign up at nnn.rocks, then connect your account:", wrapW) {
+			rightRows = append(rightRows, th.HelpDesc.Render(l))
+		}
+		rightRows = append(rightRows, "")
+		rightRows = append(rightRows, th.HelpKey.Render("nnn auth login"))
+		rightRows = append(rightRows, "")
+		for _, l := range wordWrap("Your notes will sync across all your devices automatically.", wrapW) {
+			rightRows = append(rightRows, th.HelpDesc.Render(l))
+		}
+	}
+	rightRows = append(rightRows, "", "")
+	rightRows = append(rightRows, th.DetailMeta.Render("made with ♥ by Antonio Davide Calì"))
+
+	// ── Zip columns into rows ─────────────────────────────────────────────────
+	totalRows := len(leftRows)
+	if len(rightRows) > totalRows {
+		totalRows = len(rightRows)
+	}
+	// Pad both columns to the same height.
+	for len(leftRows) < totalRows {
+		leftRows = append(leftRows, "")
+	}
+	for len(rightRows) < totalRows {
+		rightRows = append(rightRows, "")
+	}
+
+	rows := make([]string, totalRows)
+	for i := range rows {
+		// Truncate each cell to its column width without filling background.
+		lText := leftRows[i]
+		if lipgloss.Width(lText) > leftW {
+			lText = lipgloss.NewStyle().MaxWidth(leftW).Render(lText)
+		}
+		// Right-pad with plain spaces (no style) so the separator stays aligned.
+		lPad := leftW - lipgloss.Width(lText)
+		if lPad > 0 {
+			lText += strings.Repeat(" ", lPad)
+		}
+
+		rText := rightRows[i]
+		if lipgloss.Width(rText) > rightW {
+			rText = lipgloss.NewStyle().MaxWidth(rightW).Render(rText)
+		}
+
+		rows[i] = lText + sep + rText
+	}
+
+	// Append scroll hint as a full-width footer row.
 	rows = append(rows, th.DetailMeta.Render("j/k: scroll  ·  g/G: top/bottom  ·  esc/?/q: close"))
+	totalRows = len(rows)
 
-	totalRows := len(rows)
-
-	// Overhead = 1 border top + 1 border bottom = 2 rows.
-	// Padding is horizontal-only so no extra vertical rows.
+	// ── Scroll / clip ─────────────────────────────────────────────────────────
+	// helpOverhead accounts for the border (2) + padding (0) of HelpOverlay.
 	const helpOverhead = 2
-	visible := m.height - helpOverhead
+	visible := dialogH - helpOverhead
 	if visible < 1 {
 		visible = 1
 	}
 
-	// Clamp offset
 	off := m.helpOffset
 	maxOff := totalRows - visible
 	if maxOff < 0 {
@@ -1314,24 +1458,22 @@ func (m Model) renderHelp() string {
 	}
 	slice := rows[off:end]
 
-	// Pad to fill the box height so the border stays stable
 	for len(slice) < visible {
 		slice = append(slice, "")
 	}
 
-	// Add a scroll indicator in the top-right corner of the title line when
-	// the content is taller than the viewport.
+	// Scroll indicator in the top-right corner.
 	if totalRows > visible {
 		indicator := th.DetailMeta.Render(fmt.Sprintf("%d%%", (off+1)*100/totalRows))
 		titleRow := slice[0]
-		pad := m.width - 6 - lipgloss.Width(titleRow) - lipgloss.Width(indicator)
+		pad := innerW - lipgloss.Width(titleRow) - lipgloss.Width(indicator)
 		if pad > 0 {
 			slice[0] = titleRow + strings.Repeat(" ", pad) + indicator
 		}
 	}
 
 	content := strings.Join(slice, "\n")
-	return th.HelpOverlay.Width(m.width - 2).Height(m.height - 2).Render(content)
+	return th.HelpOverlay.Width(dialogW - 2).Height(dialogH - 2).Render(content)
 }
 
 func max(a, b int) int {
