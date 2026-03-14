@@ -38,6 +38,44 @@ make install   # builds and copies to ~/.local/bin/nnn
 
 ---
 
+## ✨ Cloud sync with nnn.rocks
+
+Keep your notes in sync across every machine — automatically.
+
+[nnn.rocks](https://nnn.rocks) is a hosted backend built for nnn. Log in once and your notes follow you everywhere: the TUI syncs on startup, and every edit, create, delete, pin toggle, and theme change is pushed to the cloud in the background while you work. No manual sync step needed.
+
+### Connect your account
+
+```sh
+nnn auth login
+```
+
+That's it. No password required — it uses a browser-based device flow. After authorizing, a full two-way sync runs immediately and the TUI starts auto-syncing on every launch.
+
+### How sync works
+
+| Event | What happens |
+|---|---|
+| **TUI startup** | Full two-way sync runs in the background; a brief status bar summary shows what changed |
+| **Create / edit / delete** | Change is saved locally first, then pushed to the cloud |
+| **Pin toggle** | Synced instantly in the background |
+| **Theme change** (`T`) | Saved to your cloud profile and applied on all devices |
+| **`nnn sync`** | Run a manual full sync from the CLI |
+
+Conflict resolution is last-write-wins: whichever side has the later `updated_at` timestamp keeps its version.
+
+### Other auth commands
+
+```sh
+nnn auth status   # show which account is connected
+nnn auth logout   # remove the stored token (local notes untouched)
+nnn sync          # manual two-way sync from the CLI
+```
+
+> Cloud errors are never fatal. Local operations always succeed first; errors appear briefly in the TUI status bar or on stderr and never block your workflow.
+
+---
+
 ## TUI
 
 Run `nnn` with no arguments to open the interface. Pass `--theme` to choose a color theme at launch, or press `T` inside the TUI to cycle through themes live.
@@ -255,19 +293,6 @@ Print the path to the notes file. Useful for backups or manual editing.
 nnn path
 # /Users/you/.config/nnn/notes.json
 ```
-
----
-
-## Cloud sync (nnn.rocks)
-
-nnn can optionally sync your notes to [nnn.rocks](https://nnn.rocks), a hosted backend that keeps your notes in sync across machines.
-
-1. **Log in** — `nnn auth login` opens your browser for authorization. No password required.
-2. **Sync** — `nnn sync` runs a full two-way sync. The TUI also auto-syncs on startup.
-3. **Live push** — after logging in, every create, edit, delete, pin toggle, and theme change is pushed to the cloud in the background while you work in the TUI.
-4. **Log out** — `nnn auth logout` removes the stored token. Local notes are unaffected.
-
-Cloud errors are never fatal: local operations always succeed first and errors are shown briefly in the TUI status bar or on stderr.
 
 ---
 
