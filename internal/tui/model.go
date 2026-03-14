@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/antoniocali/nnn/internal/cloud"
 	"github.com/antoniocali/nnn/internal/notes"
 	"github.com/antoniocali/nnn/internal/storage"
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,6 +34,11 @@ type errMsg struct{ err error }
 type savedMsg struct{}
 type statusClearMsg struct{}
 type saveConfigMsg struct{ theme string }
+type cloudErrMsg struct{ text string }
+type syncDoneMsg struct {
+	result storage.SyncResult
+	err    error
+}
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -79,6 +86,10 @@ type Model struct {
 
 	// version string (injected at build time via ldflags)
 	version string
+
+	// cloud auth — non-empty when the user is logged in to nnn.rocks
+	email string
+	token string
 }
 
 // New creates a fresh TUI model using the given theme name and version string.
@@ -97,6 +108,42 @@ func New(store *storage.Store, themeName string, version string) (Model, error) 
 		}
 	}
 
+	// Read the stored cloud email (empty if not logged in).
+	email := ""
+	token := ""
+	if cfg, err := store.LoadConfig(); err == nil {
+		email = cfg.Email
+		token = cfg.Token
+	}
+
+	// When logged in, fetch the cloud theme and let it override the local value.
+	// We do this synchronously here so the TUI starts with the correct theme.
+	// A short timeout ensures a slow/unavailable network doesn't block startup.
+	if token != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c := cloud.New()
+		if cloudCfg, err := c.GetConfig(ctx, token); err == nil && cloudCfg.Theme != "" {
+			if cloudCfg.Theme != themeName {
+				themeName = cloudCfg.Theme
+				// Persist back to local config so the next offline start picks it up.
+				if localCfg, err := store.LoadConfig(); err == nil {
+					localCfg.Theme = themeName
+					_ = store.SaveConfig(localCfg)
+				}
+			}
+		}
+	}
+
+	// Re-resolve theme index after possible cloud override.
+	idx = 0
+	for i, t := range AllThemes {
+		if t.Name == themeName {
+			idx = i
+			break
+		}
+	}
+
 	m := Model{
 		store:         store,
 		allNotes:      ns,
@@ -104,12 +151,17 @@ func New(store *storage.Store, themeName string, version string) (Model, error) 
 		theme:         AllThemes[idx],
 		themeIndex:    idx,
 		version:       version,
+		email:         email,
+		token:         token,
 	}
 	return m, nil
 }
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	if m.token == "" {
+		return nil
+	}
+	return m.cmdCloudSync()
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
@@ -127,6 +179,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusIsErr = true
 		return m, clearStatusAfter(4 * time.Second)
 
+	case cloudErrMsg:
+		m.statusMsg = msg.text
+		m.statusIsErr = true
+		return m, clearStatusAfter(6 * time.Second)
+
 	case savedMsg:
 		m.statusMsg = "Note saved"
 		m.statusIsErr = false
@@ -140,6 +197,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cfg, err := m.store.LoadConfig(); err == nil {
 			cfg.Theme = msg.theme
 			_ = m.store.SaveConfig(cfg)
+		}
+		return m, nil
+
+	case syncDoneMsg:
+		if msg.err != nil {
+			m.statusMsg = cloud.ClassifyError(msg.err)
+			m.statusIsErr = true
+			return m, clearStatusAfter(6 * time.Second)
+		}
+		// Reload notes to pick up any downloaded/updated notes.
+		ns, err := m.store.Load()
+		if err != nil {
+			return m, sendErr(err)
+		}
+		m.allNotes = ns
+		if m.searchQuery != "" {
+			m.filteredNotes = notes.FilterNotes(ns, m.searchQuery)
+		} else {
+			m.filteredNotes = ns
+		}
+		if m.cursor >= len(m.filteredNotes) && len(m.filteredNotes) > 0 {
+			m.cursor = len(m.filteredNotes) - 1
+		}
+		r := msg.result
+		if r.Uploaded+r.Downloaded+r.Updated+r.Deleted > 0 {
+			m.statusMsg = fmt.Sprintf("Synced: +%d ↑%d ~%d -%d",
+				r.Downloaded, r.Uploaded, r.Updated, r.Deleted)
+			m.statusIsErr = false
+			return m, clearStatusAfter(4 * time.Second)
 		}
 		return m, nil
 
@@ -239,7 +325,13 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err := m.store.TogglePin(n.ID); err != nil {
 				return m, sendErr(err)
 			}
-			return m.reloadNotes()
+			// Fire-and-forget cloud pin sync if logged in and note has a DBID.
+			var cloudCmd tea.Cmd
+			if m.token != "" && n.DBID != "" {
+				cloudCmd = m.cmdCloudPinToggle(n.DBID, !n.Pinned)
+			}
+			nm, reloadCmd := m.reloadNotes()
+			return nm, tea.Batch(reloadCmd, cloudCmd)
 		}
 
 	case "/":
@@ -260,10 +352,14 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.theme = AllThemes[m.themeIndex]
 		m.statusMsg = "Theme: " + m.theme.Name
 		m.statusIsErr = false
-		return m, tea.Batch(
-			clearStatusAfter(2*time.Second),
+		cmds := []tea.Cmd{
+			clearStatusAfter(2 * time.Second),
 			func() tea.Msg { return saveConfigMsg{theme: m.theme.Name} },
-		)
+		}
+		if m.token != "" {
+			cmds = append(cmds, m.cmdCloudPatchTheme(m.theme.Name))
+		}
+		return m, tea.Batch(cmds...)
 	}
 	return m, nil
 }
@@ -316,7 +412,13 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err := m.store.TogglePin(n.ID); err != nil {
 				return m, sendErr(err)
 			}
-			return m.reloadNotes()
+			// Fire-and-forget cloud pin sync if logged in and note has a DBID.
+			var cloudCmd tea.Cmd
+			if m.token != "" && n.DBID != "" {
+				cloudCmd = m.cmdCloudPinToggle(n.DBID, !n.Pinned)
+			}
+			nm, reloadCmd := m.reloadNotes()
+			return nm, tea.Batch(reloadCmd, cloudCmd)
 		}
 
 	case "?":
@@ -327,10 +429,14 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.theme = AllThemes[m.themeIndex]
 		m.statusMsg = "Theme: " + m.theme.Name
 		m.statusIsErr = false
-		return m, tea.Batch(
-			clearStatusAfter(2*time.Second),
+		cmds := []tea.Cmd{
+			clearStatusAfter(2 * time.Second),
 			func() tea.Msg { return saveConfigMsg{theme: m.theme.Name} },
-		)
+		}
+		if m.token != "" {
+			cmds = append(cmds, m.cmdCloudPatchTheme(m.theme.Name))
+		}
+		return m, tea.Batch(cmds...)
 	}
 	return m, nil
 }
@@ -422,15 +528,22 @@ func (m Model) handleDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		if len(m.filteredNotes) > 0 {
-			id := m.filteredNotes[m.cursor].ID
-			if err := m.store.Delete(id); err != nil {
+			n := m.filteredNotes[m.cursor]
+			if err := m.store.Delete(n.ID); err != nil {
 				m.mode = modeList
 				return m, sendErr(err)
 			}
 			m.mode = modeList
 			m.statusMsg = "Note deleted"
 			m.statusIsErr = false
-			return m.reloadNotesWith(clearStatusAfter(2 * time.Second))
+
+			// Fire-and-forget cloud delete if logged in and note has a DBID.
+			var cloudCmd tea.Cmd
+			if m.token != "" && n.DBID != "" {
+				cloudCmd = m.cmdCloudDelete(n.DBID)
+			}
+			nm, reloadCmd := m.reloadNotesWith(clearStatusAfter(2 * time.Second))
+			return nm, tea.Batch(reloadCmd, cloudCmd)
 		}
 	case "n", "N", "esc", "ctrl+c":
 		m.mode = modeList
@@ -469,17 +582,32 @@ func (m Model) saveNote() (tea.Model, tea.Cmd) {
 		title = "Untitled"
 	}
 	tags := parseTags(m.editTags)
-	var err error
+	var (
+		saved notes.Note
+		err   error
+	)
 	if m.mode == modeNew || m.editID == "" {
-		_, err = m.store.Create(title, m.editBody, tags)
+		saved, err = m.store.Create(title, m.editBody, tags)
 	} else {
-		err = m.store.Update(m.editID, title, m.editBody, tags)
+		saved, err = m.store.Update(m.editID, title, m.editBody, tags)
 	}
 	if err != nil {
 		return m, sendErr(err)
 	}
+
+	// Fire-and-forget cloud sync if the user is logged in.
+	var cloudCmd tea.Cmd
+	if m.email != "" {
+		if m.mode == modeNew || m.editID == "" {
+			cloudCmd = m.cmdCloudCreate(saved)
+		} else {
+			cloudCmd = m.cmdCloudPatch(saved)
+		}
+	}
+
 	m.mode = modeList
-	return m.reloadNotesWith(func() tea.Msg { return savedMsg{} })
+	_, reloadCmd := m.reloadNotesWith(func() tea.Msg { return savedMsg{} })
+	return m, tea.Batch(reloadCmd, cloudCmd)
 }
 
 // parseTags splits a comma-separated tag string into a cleaned slice.
@@ -523,6 +651,129 @@ func (m Model) reloadNotesWith(extra tea.Cmd) (tea.Model, tea.Cmd) {
 
 func sendErr(err error) tea.Cmd {
 	return func() tea.Msg { return errMsg{err} }
+}
+
+// cmdCloudCreate returns a tea.Cmd that POSTs n to the cloud and writes back
+// the DB id into the local store. On failure a cloudErrMsg is returned so the
+// TUI can show a classified error in the status bar.
+func (m Model) cmdCloudCreate(n notes.Note) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		c := cloud.New()
+		tags := n.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		cn, err := c.CreateNote(ctx, m.token, cloud.CreateNoteRequest{
+			Title:     n.Title,
+			Body:      n.Body,
+			Tags:      tags,
+			Pinned:    n.Pinned,
+			CreatedAt: &n.CreatedAt,
+			UpdatedAt: &n.UpdatedAt,
+		})
+		if err != nil {
+			return cloudErrMsg{text: cloud.ClassifyError(err)}
+		}
+		// Write the DBID back to disk so future edits can PATCH.
+		_ = m.store.SetDBID(n.ID, cn.ID)
+		return nil
+	}
+}
+
+// cmdCloudPatch returns a tea.Cmd that PATCHes n in the cloud.
+// If the note has no DBID yet it silently does nothing — a future sync
+// will upload it. On failure a cloudErrMsg is returned.
+func (m Model) cmdCloudPatch(n notes.Note) tea.Cmd {
+	return func() tea.Msg {
+		if n.DBID == "" {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		c := cloud.New()
+		tags := n.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		title := n.Title
+		body := n.Body
+		pinned := n.Pinned
+		_, err := c.PatchNote(ctx, m.token, n.DBID, cloud.PatchNoteRequest{
+			Title:     &title,
+			Body:      &body,
+			Tags:      tags,
+			Pinned:    &pinned,
+			UpdatedAt: &n.UpdatedAt,
+		})
+		if err != nil {
+			return cloudErrMsg{text: cloud.ClassifyError(err)}
+		}
+		return nil
+	}
+}
+
+// cmdCloudDelete returns a tea.Cmd that sends DELETE /notes/{dbID} to the cloud.
+// On failure a cloudErrMsg is returned so the TUI can show it in the status bar.
+func (m Model) cmdCloudDelete(dbID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		c := cloud.New()
+		if err := c.DeleteNote(ctx, m.token, dbID); err != nil {
+			return cloudErrMsg{text: cloud.ClassifyError(err)}
+		}
+		return nil
+	}
+}
+
+// cmdCloudPinToggle returns a tea.Cmd that PATCHes the pinned field for dbID.
+// newPinned is the value AFTER the local toggle (i.e. what we want the server to store).
+// On failure a cloudErrMsg is returned so the TUI can show it in the status bar.
+func (m Model) cmdCloudPinToggle(dbID string, newPinned bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		c := cloud.New()
+		_, err := c.PatchNote(ctx, m.token, dbID, cloud.PatchNoteRequest{
+			Pinned: &newPinned,
+		})
+		if err != nil {
+			return cloudErrMsg{text: cloud.ClassifyError(err)}
+		}
+		return nil
+	}
+}
+
+// cmdCloudPatchTheme returns a tea.Cmd that PATCHes the user's theme preference
+// on the cloud. Errors are surfaced as a cloudErrMsg in the status bar.
+func (m Model) cmdCloudPatchTheme(name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		c := cloud.New()
+		if _, err := c.PatchConfig(ctx, m.token, &name); err != nil {
+			return cloudErrMsg{text: cloud.ClassifyError(err)}
+		}
+		return nil
+	}
+}
+
+// cmdCloudSync returns a tea.Cmd that runs SyncWithCloud in a background
+// goroutine and delivers the result as a syncDoneMsg.
+func (m Model) cmdCloudSync() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		result, err := m.store.SyncWithCloud(ctx, m.token)
+		return syncDoneMsg{result: result, err: err}
+	}
 }
 
 func clearStatusAfter(d time.Duration) tea.Cmd {
@@ -623,7 +874,13 @@ func (m Model) View() string {
 
 func (m Model) renderHeader() string {
 	th := m.theme
-	logo := th.AppHeader.Render("◆ nnn")
+
+	// Logo: "◆ nnn.rocks" when logged in, "◆ nnn" otherwise.
+	logoText := "◆ nnn"
+	if m.email != "" {
+		logoText = "◆ nnn.rocks"
+	}
+	logo := th.AppHeader.Render(logoText)
 	desc := th.AppVersion.Render("an elegant TUI note manager")
 	sep := th.StatusSep.Render(" │ ")
 	modeStr := ""
@@ -640,7 +897,7 @@ func (m Model) renderHeader() string {
 
 	left := logo + sep + desc + modeStr
 
-	// Right side: version and active theme name
+	// Right side: version, theme, and — when logged in — the user's email.
 	ver := strings.TrimPrefix(m.version, "v")
 	if ver == "" {
 		ver = "dev"
@@ -648,6 +905,10 @@ func (m Model) renderHeader() string {
 	rightStr := th.AppVersion.Render("v"+ver) +
 		th.StatusSep.Render(" │ ") +
 		th.AppHeader.Render(m.theme.Name)
+	if m.email != "" {
+		rightStr += th.StatusSep.Render(" │ ") +
+			th.AppVersion.Render(m.email)
+	}
 
 	// Pad left side to push right side to the terminal edge
 	leftLen := lipgloss.Width(left)
@@ -1007,7 +1268,11 @@ func (m Model) renderHelp() string {
 
 	// Build all content lines (unstyled box, just the inner rows)
 	var rows []string
-	rows = append(rows, th.HelpTitle.Render("◆ nnn keyboard shortcuts"), "")
+	helpTitle := "◆ nnn keyboard shortcuts"
+	if m.email != "" {
+		helpTitle = "◆ nnn.rocks keyboard shortcuts"
+	}
+	rows = append(rows, th.HelpTitle.Render(helpTitle), "")
 	for _, sec := range sections {
 		rows = append(rows, th.HelpTitle.Render(sec.header))
 		for _, b := range sec.bindings {

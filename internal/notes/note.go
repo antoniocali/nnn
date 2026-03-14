@@ -14,6 +14,10 @@ type Note struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	Tags      []string  `json:"tags,omitempty"`
 	Pinned    bool      `json:"pinned,omitempty"`
+
+	// DBID is the UUID assigned by the nnn.rocks database after the note has
+	// been synced at least once. Empty for notes that have never been synced.
+	DBID string `json:"db_id,omitempty"`
 }
 
 // FilterNotes returns notes that match the given query (case-insensitive substring).
