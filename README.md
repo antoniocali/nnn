@@ -2,7 +2,7 @@
 
 ![demo](assets/demo.gif)
 
-A fast, keyboard-driven terminal note manager built with [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+A fast, keyboard-driven terminal note manager built with [Bubble Tea](https://github.com/charmbracelet/bubbletea). Notes are stored locally as human-readable JSON and optionally synced to the cloud via [nnn.rocks](https://nnn.rocks).
 
 Two ways to use it: open the full TUI with `nnn`, or drive it from the command line for scripting and quick capture.
 
@@ -47,6 +47,8 @@ nnn
 nnn --theme dracula
 nnn -t tokyo-night
 ```
+
+When logged in to nnn.rocks the TUI performs a background sync on startup and shows a brief status bar summary of what changed. Cloud operations (create, edit, delete, pin toggle, theme change) are also pushed in the background as you work — local saves always succeed first.
 
 ### Layout
 
@@ -106,7 +108,7 @@ Search matches against both title and body (case-insensitive).
 
 | Key | Action |
 |---|---|
-| `T` | Cycle through themes |
+| `T` | Cycle through themes (synced to cloud when logged in) |
 | `?` | Toggle help overlay (scrollable with `j`/`k`) |
 | `q` / `Ctrl+C` | Quit |
 
@@ -126,7 +128,9 @@ nnn ships with 7 built-in themes.
 | `solarized` | Light background with warm and cool accents |
 | `dracula` | Dark with vibrant purple and pink accents |
 
-Set a theme at launch with `--theme` / `-t`, or press `T` inside the TUI to cycle through them. The chosen theme is saved automatically to `~/.config/nnn/config.json` and restored on the next launch. The `--theme` flag always takes precedence over the saved value.
+Set a theme at launch with `--theme` / `-t`, or press `T` inside the TUI to cycle through them. The chosen theme is saved automatically to `~/.config/nnn/config.json` and restored on the next launch. When logged in to nnn.rocks the active theme is also synced to your account and applied across devices.
+
+**Theme selection priority**: `--theme` flag > cloud config > `config.json` saved value > `amber`.
 
 ---
 
@@ -148,6 +152,8 @@ nnn create "Idea" --tags work,ideas
 |---|---|---|
 | `--body` | `-b` | Note body (`\n` is interpreted as a newline) |
 | `--tags` | `-t` | Comma-separated tags |
+
+When logged in, the note is also uploaded to nnn.rocks immediately.
 
 ### `nnn list`
 
@@ -192,18 +198,54 @@ nnn delete abc12345 --force   # skip confirmation
 |---|---|---|
 | `--force` | `-f` | Skip the `y/N` confirmation prompt |
 
+When logged in and the note has been synced, the cloud record is deleted too.
+
 ### `nnn purge`
 
-Permanently delete the entire `notes.json` file. All notes are lost and this cannot be undone.
+Permanently delete notes. Behaviour depends on the flags passed.
 
 ```sh
-nnn purge
-nnn purge --force   # skip confirmation
+nnn purge              # delete cloud notes first, then delete notes.json, log out
+nnn purge --local      # delete notes.json and log out; cloud untouched
+nnn purge --web        # delete all cloud notes and strip local DBIDs; local file kept
+nnn purge --force      # skip confirmation (works with all modes)
 ```
 
 | Flag | Short | Description |
 |---|---|---|
+| `--local` | | Delete only the local `notes.json`; cloud data is untouched |
+| `--web` | | Delete only the cloud notes; local file is kept |
 | `--force` | `-f` | Skip the `y/N` confirmation prompt |
+
+`--local` and `--web` are mutually exclusive. All modes log the user out.
+
+### `nnn sync`
+
+Two-way sync between local notes and nnn.rocks. Requires being logged in.
+
+```sh
+nnn sync
+```
+
+Conflict resolution rules:
+
+- Local notes with no cloud link are uploaded.
+- Cloud notes not present locally are downloaded.
+- When a note exists on both sides, the version with the later `updated_at` wins (last-write wins).
+- Notes deleted on the cloud are removed locally — cloud deletions always take precedence.
+- Your theme preference is fetched from the cloud and saved locally.
+
+### `nnn auth`
+
+Manage authentication with nnn.rocks.
+
+```sh
+nnn auth login    # start the device flow; opens browser for authorization
+nnn auth logout   # remove stored token
+nnn auth status   # print current login status
+```
+
+After a successful login, a full sync is performed automatically.
 
 ### `nnn path`
 
@@ -213,6 +255,19 @@ Print the path to the notes file. Useful for backups or manual editing.
 nnn path
 # /Users/you/.config/nnn/notes.json
 ```
+
+---
+
+## Cloud sync (nnn.rocks)
+
+nnn can optionally sync your notes to [nnn.rocks](https://nnn.rocks), a hosted backend that keeps your notes in sync across machines.
+
+1. **Log in** — `nnn auth login` opens your browser for authorization. No password required.
+2. **Sync** — `nnn sync` runs a full two-way sync. The TUI also auto-syncs on startup.
+3. **Live push** — after logging in, every create, edit, delete, pin toggle, and theme change is pushed to the cloud in the background while you work in the TUI.
+4. **Log out** — `nnn auth logout` removes the stored token. Local notes are unaffected.
+
+Cloud errors are never fatal: local operations always succeed first and errors are shown briefly in the TUI status bar or on stderr.
 
 ---
 
@@ -232,6 +287,7 @@ Both files are human-readable and easy to back up, sync with git, or process wit
   "notes": [
     {
       "id": "466d326a-9345-4f15-97d2-6746f19811b8",
+      "db_id": "a1b2c3d4-...",
       "title": "Ideas",
       "body": "1. Build a better mousetrap\n2. Write more tests",
       "created_at": "2026-03-07T07:50:48Z",
@@ -242,6 +298,8 @@ Both files are human-readable and easy to back up, sync with git, or process wit
   ]
 }
 ```
+
+`db_id` is populated after the note has been synced to nnn.rocks and is used to link local notes to their cloud counterparts.
 
 ---
 

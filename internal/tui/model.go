@@ -1,11 +1,13 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/antoniocali/nnn/internal/cloud"
 	"github.com/antoniocali/nnn/internal/notes"
 	"github.com/antoniocali/nnn/internal/storage"
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,6 +34,11 @@ type errMsg struct{ err error }
 type savedMsg struct{}
 type statusClearMsg struct{}
 type saveConfigMsg struct{ theme string }
+type cloudErrMsg struct{ text string }
+type syncDoneMsg struct {
+	result storage.SyncResult
+	err    error
+}
 
 // ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -79,6 +86,10 @@ type Model struct {
 
 	// version string (injected at build time via ldflags)
 	version string
+
+	// cloud auth — non-empty when the user is logged in to nnn.rocks
+	email string
+	token string
 }
 
 // New creates a fresh TUI model using the given theme name and version string.
@@ -97,6 +108,42 @@ func New(store *storage.Store, themeName string, version string) (Model, error) 
 		}
 	}
 
+	// Read the stored cloud email (empty if not logged in).
+	email := ""
+	token := ""
+	if cfg, err := store.LoadConfig(); err == nil {
+		email = cfg.Email
+		token = cfg.Token
+	}
+
+	// When logged in, fetch the cloud theme and let it override the local value.
+	// We do this synchronously here so the TUI starts with the correct theme.
+	// A short timeout ensures a slow/unavailable network doesn't block startup.
+	if token != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		c := cloud.New()
+		if cloudCfg, err := c.GetConfig(ctx, token); err == nil && cloudCfg.Theme != "" {
+			if cloudCfg.Theme != themeName {
+				themeName = cloudCfg.Theme
+				// Persist back to local config so the next offline start picks it up.
+				if localCfg, err := store.LoadConfig(); err == nil {
+					localCfg.Theme = themeName
+					_ = store.SaveConfig(localCfg)
+				}
+			}
+		}
+	}
+
+	// Re-resolve theme index after possible cloud override.
+	idx = 0
+	for i, t := range AllThemes {
+		if t.Name == themeName {
+			idx = i
+			break
+		}
+	}
+
 	m := Model{
 		store:         store,
 		allNotes:      ns,
@@ -104,12 +151,17 @@ func New(store *storage.Store, themeName string, version string) (Model, error) 
 		theme:         AllThemes[idx],
 		themeIndex:    idx,
 		version:       version,
+		email:         email,
+		token:         token,
 	}
 	return m, nil
 }
 
 func (m Model) Init() tea.Cmd {
-	return nil
+	if m.token == "" {
+		return nil
+	}
+	return m.cmdCloudSync()
 }
 
 // ── Update ────────────────────────────────────────────────────────────────────
@@ -127,6 +179,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusIsErr = true
 		return m, clearStatusAfter(4 * time.Second)
 
+	case cloudErrMsg:
+		m.statusMsg = msg.text
+		m.statusIsErr = true
+		return m, clearStatusAfter(6 * time.Second)
+
 	case savedMsg:
 		m.statusMsg = "Note saved"
 		m.statusIsErr = false
@@ -140,6 +197,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cfg, err := m.store.LoadConfig(); err == nil {
 			cfg.Theme = msg.theme
 			_ = m.store.SaveConfig(cfg)
+		}
+		return m, nil
+
+	case syncDoneMsg:
+		if msg.err != nil {
+			m.statusMsg = cloud.ClassifyError(msg.err)
+			m.statusIsErr = true
+			return m, clearStatusAfter(6 * time.Second)
+		}
+		// Reload notes to pick up any downloaded/updated notes.
+		ns, err := m.store.Load()
+		if err != nil {
+			return m, sendErr(err)
+		}
+		m.allNotes = ns
+		if m.searchQuery != "" {
+			m.filteredNotes = notes.FilterNotes(ns, m.searchQuery)
+		} else {
+			m.filteredNotes = ns
+		}
+		if m.cursor >= len(m.filteredNotes) && len(m.filteredNotes) > 0 {
+			m.cursor = len(m.filteredNotes) - 1
+		}
+		r := msg.result
+		if r.Uploaded+r.Downloaded+r.Updated+r.Deleted > 0 {
+			m.statusMsg = fmt.Sprintf("Synced: +%d ↑%d ~%d -%d",
+				r.Downloaded, r.Uploaded, r.Updated, r.Deleted)
+			m.statusIsErr = false
+			return m, clearStatusAfter(4 * time.Second)
 		}
 		return m, nil
 
@@ -239,7 +325,13 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err := m.store.TogglePin(n.ID); err != nil {
 				return m, sendErr(err)
 			}
-			return m.reloadNotes()
+			// Fire-and-forget cloud pin sync if logged in and note has a DBID.
+			var cloudCmd tea.Cmd
+			if m.token != "" && n.DBID != "" {
+				cloudCmd = m.cmdCloudPinToggle(n.DBID, !n.Pinned)
+			}
+			nm, reloadCmd := m.reloadNotes()
+			return nm, tea.Batch(reloadCmd, cloudCmd)
 		}
 
 	case "/":
@@ -260,10 +352,14 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.theme = AllThemes[m.themeIndex]
 		m.statusMsg = "Theme: " + m.theme.Name
 		m.statusIsErr = false
-		return m, tea.Batch(
-			clearStatusAfter(2*time.Second),
+		cmds := []tea.Cmd{
+			clearStatusAfter(2 * time.Second),
 			func() tea.Msg { return saveConfigMsg{theme: m.theme.Name} },
-		)
+		}
+		if m.token != "" {
+			cmds = append(cmds, m.cmdCloudPatchTheme(m.theme.Name))
+		}
+		return m, tea.Batch(cmds...)
 	}
 	return m, nil
 }
@@ -316,7 +412,13 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if err := m.store.TogglePin(n.ID); err != nil {
 				return m, sendErr(err)
 			}
-			return m.reloadNotes()
+			// Fire-and-forget cloud pin sync if logged in and note has a DBID.
+			var cloudCmd tea.Cmd
+			if m.token != "" && n.DBID != "" {
+				cloudCmd = m.cmdCloudPinToggle(n.DBID, !n.Pinned)
+			}
+			nm, reloadCmd := m.reloadNotes()
+			return nm, tea.Batch(reloadCmd, cloudCmd)
 		}
 
 	case "?":
@@ -327,10 +429,14 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.theme = AllThemes[m.themeIndex]
 		m.statusMsg = "Theme: " + m.theme.Name
 		m.statusIsErr = false
-		return m, tea.Batch(
-			clearStatusAfter(2*time.Second),
+		cmds := []tea.Cmd{
+			clearStatusAfter(2 * time.Second),
 			func() tea.Msg { return saveConfigMsg{theme: m.theme.Name} },
-		)
+		}
+		if m.token != "" {
+			cmds = append(cmds, m.cmdCloudPatchTheme(m.theme.Name))
+		}
+		return m, tea.Batch(cmds...)
 	}
 	return m, nil
 }
@@ -422,15 +528,22 @@ func (m Model) handleDeleteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "y", "Y":
 		if len(m.filteredNotes) > 0 {
-			id := m.filteredNotes[m.cursor].ID
-			if err := m.store.Delete(id); err != nil {
+			n := m.filteredNotes[m.cursor]
+			if err := m.store.Delete(n.ID); err != nil {
 				m.mode = modeList
 				return m, sendErr(err)
 			}
 			m.mode = modeList
 			m.statusMsg = "Note deleted"
 			m.statusIsErr = false
-			return m.reloadNotesWith(clearStatusAfter(2 * time.Second))
+
+			// Fire-and-forget cloud delete if logged in and note has a DBID.
+			var cloudCmd tea.Cmd
+			if m.token != "" && n.DBID != "" {
+				cloudCmd = m.cmdCloudDelete(n.DBID)
+			}
+			nm, reloadCmd := m.reloadNotesWith(clearStatusAfter(2 * time.Second))
+			return nm, tea.Batch(reloadCmd, cloudCmd)
 		}
 	case "n", "N", "esc", "ctrl+c":
 		m.mode = modeList
@@ -469,17 +582,32 @@ func (m Model) saveNote() (tea.Model, tea.Cmd) {
 		title = "Untitled"
 	}
 	tags := parseTags(m.editTags)
-	var err error
+	var (
+		saved notes.Note
+		err   error
+	)
 	if m.mode == modeNew || m.editID == "" {
-		_, err = m.store.Create(title, m.editBody, tags)
+		saved, err = m.store.Create(title, m.editBody, tags)
 	} else {
-		err = m.store.Update(m.editID, title, m.editBody, tags)
+		saved, err = m.store.Update(m.editID, title, m.editBody, tags)
 	}
 	if err != nil {
 		return m, sendErr(err)
 	}
+
+	// Fire-and-forget cloud sync if the user is logged in.
+	var cloudCmd tea.Cmd
+	if m.email != "" {
+		if m.mode == modeNew || m.editID == "" {
+			cloudCmd = m.cmdCloudCreate(saved)
+		} else {
+			cloudCmd = m.cmdCloudPatch(saved)
+		}
+	}
+
 	m.mode = modeList
-	return m.reloadNotesWith(func() tea.Msg { return savedMsg{} })
+	nm, reloadCmd := m.reloadNotesWith(func() tea.Msg { return savedMsg{} })
+	return nm, tea.Batch(reloadCmd, cloudCmd)
 }
 
 // parseTags splits a comma-separated tag string into a cleaned slice.
@@ -523,6 +651,129 @@ func (m Model) reloadNotesWith(extra tea.Cmd) (tea.Model, tea.Cmd) {
 
 func sendErr(err error) tea.Cmd {
 	return func() tea.Msg { return errMsg{err} }
+}
+
+// cmdCloudCreate returns a tea.Cmd that POSTs n to the cloud and writes back
+// the DB id into the local store. On failure a cloudErrMsg is returned so the
+// TUI can show a classified error in the status bar.
+func (m Model) cmdCloudCreate(n notes.Note) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		c := cloud.New()
+		tags := n.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		cn, err := c.CreateNote(ctx, m.token, cloud.CreateNoteRequest{
+			Title:     n.Title,
+			Body:      n.Body,
+			Tags:      tags,
+			Pinned:    n.Pinned,
+			CreatedAt: &n.CreatedAt,
+			UpdatedAt: &n.UpdatedAt,
+		})
+		if err != nil {
+			return cloudErrMsg{text: cloud.ClassifyError(err)}
+		}
+		// Write the DBID back to disk so future edits can PATCH.
+		_ = m.store.SetDBID(n.ID, cn.ID)
+		return nil
+	}
+}
+
+// cmdCloudPatch returns a tea.Cmd that PATCHes n in the cloud.
+// If the note has no DBID yet it silently does nothing — a future sync
+// will upload it. On failure a cloudErrMsg is returned.
+func (m Model) cmdCloudPatch(n notes.Note) tea.Cmd {
+	return func() tea.Msg {
+		if n.DBID == "" {
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		c := cloud.New()
+		tags := n.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		title := n.Title
+		body := n.Body
+		pinned := n.Pinned
+		_, err := c.PatchNote(ctx, m.token, n.DBID, cloud.PatchNoteRequest{
+			Title:     &title,
+			Body:      &body,
+			Tags:      tags,
+			Pinned:    &pinned,
+			UpdatedAt: &n.UpdatedAt,
+		})
+		if err != nil {
+			return cloudErrMsg{text: cloud.ClassifyError(err)}
+		}
+		return nil
+	}
+}
+
+// cmdCloudDelete returns a tea.Cmd that sends DELETE /notes/{dbID} to the cloud.
+// On failure a cloudErrMsg is returned so the TUI can show it in the status bar.
+func (m Model) cmdCloudDelete(dbID string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		c := cloud.New()
+		if err := c.DeleteNote(ctx, m.token, dbID); err != nil {
+			return cloudErrMsg{text: cloud.ClassifyError(err)}
+		}
+		return nil
+	}
+}
+
+// cmdCloudPinToggle returns a tea.Cmd that PATCHes the pinned field for dbID.
+// newPinned is the value AFTER the local toggle (i.e. what we want the server to store).
+// On failure a cloudErrMsg is returned so the TUI can show it in the status bar.
+func (m Model) cmdCloudPinToggle(dbID string, newPinned bool) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		c := cloud.New()
+		_, err := c.PatchNote(ctx, m.token, dbID, cloud.PatchNoteRequest{
+			Pinned: &newPinned,
+		})
+		if err != nil {
+			return cloudErrMsg{text: cloud.ClassifyError(err)}
+		}
+		return nil
+	}
+}
+
+// cmdCloudPatchTheme returns a tea.Cmd that PATCHes the user's theme preference
+// on the cloud. Errors are surfaced as a cloudErrMsg in the status bar.
+func (m Model) cmdCloudPatchTheme(name string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		c := cloud.New()
+		if _, err := c.PatchConfig(ctx, m.token, &name); err != nil {
+			return cloudErrMsg{text: cloud.ClassifyError(err)}
+		}
+		return nil
+	}
+}
+
+// cmdCloudSync returns a tea.Cmd that runs SyncWithCloud in a background
+// goroutine and delivers the result as a syncDoneMsg.
+func (m Model) cmdCloudSync() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		result, err := m.store.SyncWithCloud(ctx, m.token)
+		return syncDoneMsg{result: result, err: err}
+	}
 }
 
 func clearStatusAfter(d time.Duration) tea.Cmd {
@@ -593,11 +844,6 @@ func (m Model) View() string {
 		return ""
 	}
 
-	// Help overlay shortcircuit
-	if m.mode == modeHelp {
-		return m.renderHelp()
-	}
-
 	// Heights
 	headerH := 1
 	statusH := 1
@@ -614,16 +860,33 @@ func (m Model) View() string {
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, listPanel, " ", detailPanel)
 
-	return lipgloss.JoinVertical(lipgloss.Left,
+	bg := lipgloss.JoinVertical(lipgloss.Left,
 		header,
 		body,
 		status,
 	)
+
+	// Help overlay: render dialog and place it centered over the background.
+	if m.mode == modeHelp {
+		dialog := m.renderHelp()
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			dialog,
+		)
+	}
+
+	return bg
 }
 
 func (m Model) renderHeader() string {
 	th := m.theme
-	logo := th.AppHeader.Render("◆ nnn")
+
+	// Logo: "◆ nnn.rocks" when logged in, "◆ nnn" otherwise.
+	logoText := "◆ nnn"
+	if m.email != "" {
+		logoText = "◆ nnn.rocks"
+	}
+	logo := th.AppHeader.Render(logoText)
 	desc := th.AppVersion.Render("an elegant TUI note manager")
 	sep := th.StatusSep.Render(" │ ")
 	modeStr := ""
@@ -640,7 +903,7 @@ func (m Model) renderHeader() string {
 
 	left := logo + sep + desc + modeStr
 
-	// Right side: version and active theme name
+	// Right side: version, theme, and — when logged in — the user's email.
 	ver := strings.TrimPrefix(m.version, "v")
 	if ver == "" {
 		ver = "dev"
@@ -648,6 +911,10 @@ func (m Model) renderHeader() string {
 	rightStr := th.AppVersion.Render("v"+ver) +
 		th.StatusSep.Render(" │ ") +
 		th.AppHeader.Render(m.theme.Name)
+	if m.email != "" {
+		rightStr += th.StatusSep.Render(" │ ") +
+			th.AppVersion.Render(m.email)
+	}
 
 	// Pad left side to push right side to the terminal edge
 	leftLen := lipgloss.Width(left)
@@ -965,6 +1232,34 @@ func (m Model) renderStatus() string {
 
 func (m Model) renderHelp() string {
 	th := m.theme
+
+	// ── Dialog dimensions (capped so it floats, not full-screen) ─────────────
+	dialogW := m.width - 8
+	if dialogW > 110 {
+		dialogW = 110
+	}
+	if dialogW < 30 {
+		dialogW = 30
+	}
+	dialogH := m.height - 6
+	if dialogH > 42 {
+		dialogH = 42
+	}
+	if dialogH < 10 {
+		dialogH = 10
+	}
+
+	// ── Total inner width available (overlay has 2-char border + 3 padding each side = 8) ─
+	innerW := dialogW - 8
+	if innerW < 20 {
+		innerW = 20
+	}
+	sepW := 1
+	halfW := (innerW - sepW) / 2
+	leftW := halfW
+	rightW := innerW - sepW - leftW
+
+	// ── Left column: keyboard shortcuts ──────────────────────────────────────
 	type binding struct{ key, desc string }
 	sections := []struct {
 		header   string
@@ -1005,32 +1300,146 @@ func (m Model) renderHelp() string {
 		}},
 	}
 
-	// Build all content lines (unstyled box, just the inner rows)
-	var rows []string
-	rows = append(rows, th.HelpTitle.Render("◆ nnn keyboard shortcuts"), "")
+	const keyColW = 16 // fixed width for the key column in shortcut rows
+
+	var leftRows []string
+	leftRows = append(leftRows, th.HelpTitle.Render("Keyboard shortcuts"), "")
 	for _, sec := range sections {
-		rows = append(rows, th.HelpTitle.Render(sec.header))
+		leftRows = append(leftRows, th.HelpTitle.Render(sec.header))
 		for _, b := range sec.bindings {
-			rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top,
-				th.HelpKey.Render(b.key),
-				th.HelpDesc.Render(b.desc),
-			))
+			keyRendered := th.HelpKey.Render(b.key)
+			// Pad the key cell to keyColW so descriptions align regardless of key length.
+			pad := keyColW - lipgloss.Width(keyRendered)
+			if pad < 1 {
+				pad = 1
+			}
+			leftRows = append(leftRows, keyRendered+strings.Repeat(" ", pad)+th.HelpDesc.Render(b.desc))
 		}
-		rows = append(rows, "")
+		leftRows = append(leftRows, "")
 	}
+
+	// ── Right column: about ───────────────────────────────────────────────────
+	sep := th.DetailMeta.Render("│")
+
+	// wordWrap wraps text to fit within w runes, returning one string per line.
+	wordWrap := func(text string, w int) []string {
+		if w < 1 {
+			return []string{text}
+		}
+		var lines []string
+		for _, paragraph := range strings.Split(text, "\n") {
+			words := strings.Fields(paragraph)
+			if len(words) == 0 {
+				lines = append(lines, "")
+				continue
+			}
+			line := ""
+			for _, word := range words {
+				if line == "" {
+					line = word
+				} else if utf8.RuneCountInString(line)+1+utf8.RuneCountInString(word) <= w {
+					line += " " + word
+				} else {
+					lines = append(lines, line)
+					line = word
+				}
+			}
+			if line != "" {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+
+	wrapW := rightW - 2 // leave a little breathing room
+	if wrapW < 10 {
+		wrapW = 10
+	}
+
+	var rightRows []string
+	rightRows = append(rightRows, th.HelpTitle.Render("About nnn"), "")
+
+	about := "nnn is a keyboard-driven TUI for managing notes in the terminal — built with Bubble Tea and lipgloss, because plain text and fast navigation are all you really need."
+	for _, l := range wordWrap(about, wrapW) {
+		rightRows = append(rightRows, th.HelpDesc.Render(l))
+	}
+	rightRows = append(rightRows, "", "")
+
+	cloud := "Notes can be synced to nnn.rocks, a hosted backend that keeps your notes in sync across devices and machines."
+	for _, l := range wordWrap(cloud, wrapW) {
+		rightRows = append(rightRows, th.HelpDesc.Render(l))
+	}
+	rightRows = append(rightRows, "", "")
+
+	if m.email != "" {
+		rightRows = append(rightRows, th.HelpTitle.Render("Cloud sync"), "")
+		rightRows = append(rightRows, th.HelpDesc.Render("Signed in as:"))
+		rightRows = append(rightRows, th.HelpKey.Render(m.email))
+		rightRows = append(rightRows, "")
+		for _, l := range wordWrap("Notes sync automatically on startup. Every edit, create, delete, and pin change is pushed in the background.", wrapW) {
+			rightRows = append(rightRows, th.HelpDesc.Render(l))
+		}
+	} else {
+		rightRows = append(rightRows, th.HelpTitle.Render("Cloud sync"), "")
+		for _, l := range wordWrap("Sign up at nnn.rocks, then connect your account:", wrapW) {
+			rightRows = append(rightRows, th.HelpDesc.Render(l))
+		}
+		rightRows = append(rightRows, "")
+		rightRows = append(rightRows, th.HelpKey.Render("nnn auth login"))
+		rightRows = append(rightRows, "")
+		for _, l := range wordWrap("Your notes will sync across all your devices automatically.", wrapW) {
+			rightRows = append(rightRows, th.HelpDesc.Render(l))
+		}
+	}
+	rightRows = append(rightRows, "", "")
+	rightRows = append(rightRows, th.DetailMeta.Render("made with ♥ by Antonio Davide Calì"))
+
+	// ── Zip columns into rows ─────────────────────────────────────────────────
+	totalRows := len(leftRows)
+	if len(rightRows) > totalRows {
+		totalRows = len(rightRows)
+	}
+	// Pad both columns to the same height.
+	for len(leftRows) < totalRows {
+		leftRows = append(leftRows, "")
+	}
+	for len(rightRows) < totalRows {
+		rightRows = append(rightRows, "")
+	}
+
+	rows := make([]string, totalRows)
+	for i := range rows {
+		// Truncate each cell to its column width without filling background.
+		lText := leftRows[i]
+		if lipgloss.Width(lText) > leftW {
+			lText = lipgloss.NewStyle().MaxWidth(leftW).Render(lText)
+		}
+		// Right-pad with plain spaces (no style) so the separator stays aligned.
+		lPad := leftW - lipgloss.Width(lText)
+		if lPad > 0 {
+			lText += strings.Repeat(" ", lPad)
+		}
+
+		rText := rightRows[i]
+		if lipgloss.Width(rText) > rightW {
+			rText = lipgloss.NewStyle().MaxWidth(rightW).Render(rText)
+		}
+
+		rows[i] = lText + sep + rText
+	}
+
+	// Append scroll hint as a full-width footer row.
 	rows = append(rows, th.DetailMeta.Render("j/k: scroll  ·  g/G: top/bottom  ·  esc/?/q: close"))
+	totalRows = len(rows)
 
-	totalRows := len(rows)
-
-	// Overhead = 1 border top + 1 border bottom = 2 rows.
-	// Padding is horizontal-only so no extra vertical rows.
+	// ── Scroll / clip ─────────────────────────────────────────────────────────
+	// helpOverhead accounts for the border (2) + padding (0) of HelpOverlay.
 	const helpOverhead = 2
-	visible := m.height - helpOverhead
+	visible := dialogH - helpOverhead
 	if visible < 1 {
 		visible = 1
 	}
 
-	// Clamp offset
 	off := m.helpOffset
 	maxOff := totalRows - visible
 	if maxOff < 0 {
@@ -1049,24 +1458,22 @@ func (m Model) renderHelp() string {
 	}
 	slice := rows[off:end]
 
-	// Pad to fill the box height so the border stays stable
 	for len(slice) < visible {
 		slice = append(slice, "")
 	}
 
-	// Add a scroll indicator in the top-right corner of the title line when
-	// the content is taller than the viewport.
+	// Scroll indicator in the top-right corner.
 	if totalRows > visible {
 		indicator := th.DetailMeta.Render(fmt.Sprintf("%d%%", (off+1)*100/totalRows))
 		titleRow := slice[0]
-		pad := m.width - 6 - lipgloss.Width(titleRow) - lipgloss.Width(indicator)
+		pad := innerW - lipgloss.Width(titleRow) - lipgloss.Width(indicator)
 		if pad > 0 {
 			slice[0] = titleRow + strings.Repeat(" ", pad) + indicator
 		}
 	}
 
 	content := strings.Join(slice, "\n")
-	return th.HelpOverlay.Width(m.width - 2).Height(m.height - 2).Render(content)
+	return th.HelpOverlay.Width(dialogW - 2).Height(dialogH - 2).Render(content)
 }
 
 func max(a, b int) int {
