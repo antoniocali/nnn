@@ -606,8 +606,8 @@ func (m Model) saveNote() (tea.Model, tea.Cmd) {
 	}
 
 	m.mode = modeList
-	_, reloadCmd := m.reloadNotesWith(func() tea.Msg { return savedMsg{} })
-	return m, tea.Batch(reloadCmd, cloudCmd)
+	nm, reloadCmd := m.reloadNotesWith(func() tea.Msg { return savedMsg{} })
+	return nm, tea.Batch(reloadCmd, cloudCmd)
 }
 
 // parseTags splits a comma-separated tag string into a cleaned slice.
