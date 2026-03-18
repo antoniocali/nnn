@@ -1475,7 +1475,7 @@ func (m Model) renderHelp() string {
 	var rightRows []string
 	rightRows = append(rightRows, th.HelpTitle.Render("About nnn"), "")
 
-	about := "nnn is a keyboard-driven TUI for managing notes in the terminal — built with Bubble Tea and lipgloss, because plain text and fast navigation are all you really need."
+	about := "nnn is a keyboard-driven TUI for managing notes in the terminal — built with Bubble Tea and lipgloss, because Markdown and fast navigation are all you really need."
 	for _, l := range wordWrap(about, wrapW) {
 		rightRows = append(rightRows, th.HelpDesc.Render(l))
 	}
