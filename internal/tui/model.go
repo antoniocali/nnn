@@ -11,6 +11,7 @@ import (
 	"github.com/antoniocali/nnn/internal/notes"
 	"github.com/antoniocali/nnn/internal/storage"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -19,13 +20,14 @@ import (
 type mode int
 
 const (
-	modeList   mode = iota // navigating the list
-	modeDetail             // reading detail (right panel focused)
-	modeEdit               // editing an existing note
-	modeNew                // creating a new note
-	modeSearch             // typing a search query
-	modeDelete             // confirm delete
-	modeHelp               // help overlay
+	modeList      mode = iota // navigating the list
+	modeDetail                // reading detail (right panel focused)
+	modeEdit                  // editing an existing note
+	modeNew                   // creating a new note
+	modeSearch                // typing a search query
+	modeDelete                // confirm delete
+	modeHelp                  // help overlay
+	modeChangelog             // what's new overlay
 )
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -34,6 +36,7 @@ type errMsg struct{ err error }
 type savedMsg struct{}
 type statusClearMsg struct{}
 type saveConfigMsg struct{ theme string }
+type saveChangelogSeenMsg struct{ version string }
 type cloudErrMsg struct{ text string }
 type syncDoneMsg struct {
 	result storage.SyncResult
@@ -75,6 +78,10 @@ type Model struct {
 	// scroll for help overlay
 	helpOffset int
 
+	// changelog overlay
+	changelogOffset int
+	showChangelog   bool // true when this run is the first with a new version
+
 	// status bar
 	statusMsg    string
 	statusIsErr  bool
@@ -111,9 +118,18 @@ func New(store *storage.Store, themeName string, version string) (Model, error) 
 	// Read the stored cloud email (empty if not logged in).
 	email := ""
 	token := ""
+	showChangelog := false
 	if cfg, err := store.LoadConfig(); err == nil {
 		email = cfg.Email
 		token = cfg.Token
+		// Show the changelog overlay once when the running version is new.
+		// We compare normalized versions (strip leading "v") so "v0.2.0" and
+		// "0.2.0" are treated as the same. Dev builds are skipped entirely.
+		runningVer := strings.TrimPrefix(version, "v")
+		seenVer := strings.TrimPrefix(cfg.LastSeenVersion, "v")
+		if runningVer != "" && runningVer != "dev" && runningVer != seenVer {
+			showChangelog = true
+		}
 	}
 
 	// When logged in, fetch the cloud theme and let it override the local value.
@@ -153,6 +169,10 @@ func New(store *storage.Store, themeName string, version string) (Model, error) 
 		version:       version,
 		email:         email,
 		token:         token,
+		showChangelog: showChangelog,
+	}
+	if showChangelog {
+		m.mode = modeChangelog
 	}
 	return m, nil
 }
@@ -196,6 +216,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case saveConfigMsg:
 		if cfg, err := m.store.LoadConfig(); err == nil {
 			cfg.Theme = msg.theme
+			_ = m.store.SaveConfig(cfg)
+		}
+		return m, nil
+
+	case saveChangelogSeenMsg:
+		if cfg, err := m.store.LoadConfig(); err == nil {
+			cfg.LastSeenVersion = msg.version
 			_ = m.store.SaveConfig(cfg)
 		}
 		return m, nil
@@ -249,6 +276,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDeleteKey(msg)
 	case modeHelp:
 		return m.handleHelpKey(msg)
+	case modeChangelog:
+		return m.handleChangelogKey(msg)
 	}
 	return m, nil
 }
@@ -360,6 +389,10 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.cmdCloudPatchTheme(m.theme.Name))
 		}
 		return m, tea.Batch(cmds...)
+
+	case "V":
+		m.mode = modeChangelog
+		m.changelogOffset = 0
 	}
 	return m, nil
 }
@@ -437,6 +470,10 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.cmdCloudPatchTheme(m.theme.Name))
 		}
 		return m, tea.Batch(cmds...)
+
+	case "V":
+		m.mode = modeChangelog
+		m.changelogOffset = 0
 	}
 	return m, nil
 }
@@ -806,6 +843,56 @@ func handleTextInput(text string, cursorPos *int, msg tea.KeyMsg) string {
 		if pos < len(runes) {
 			pos++
 		}
+	case "up":
+		// Find start of current line
+		lineStart := pos
+		for lineStart > 0 && runes[lineStart-1] != '\n' {
+			lineStart--
+		}
+		col := pos - lineStart
+		if lineStart == 0 {
+			// Already on the first line; move to start
+			pos = 0
+		} else {
+			// Find start of previous line
+			prevLineEnd := lineStart - 1 // points at the '\n'
+			prevLineStart := prevLineEnd
+			for prevLineStart > 0 && runes[prevLineStart-1] != '\n' {
+				prevLineStart--
+			}
+			prevLineLen := prevLineEnd - prevLineStart
+			if col > prevLineLen {
+				col = prevLineLen
+			}
+			pos = prevLineStart + col
+		}
+	case "down":
+		// Find end of current line
+		lineStart := pos
+		for lineStart > 0 && runes[lineStart-1] != '\n' {
+			lineStart--
+		}
+		col := pos - lineStart
+		lineEnd := pos
+		for lineEnd < len(runes) && runes[lineEnd] != '\n' {
+			lineEnd++
+		}
+		if lineEnd == len(runes) {
+			// Already on the last line; move to end
+			pos = len(runes)
+		} else {
+			// Find end of next line
+			nextLineStart := lineEnd + 1
+			nextLineEnd := nextLineStart
+			for nextLineEnd < len(runes) && runes[nextLineEnd] != '\n' {
+				nextLineEnd++
+			}
+			nextLineLen := nextLineEnd - nextLineStart
+			if col > nextLineLen {
+				col = nextLineLen
+			}
+			pos = nextLineStart + col
+		}
 	case "home", "ctrl+a":
 		// go to start of current line
 		for pos > 0 && runes[pos-1] != '\n' {
@@ -875,6 +962,15 @@ func (m Model) View() string {
 		)
 	}
 
+	// Changelog overlay: same floating pattern as help.
+	if m.mode == modeChangelog {
+		dialog := m.renderChangelog()
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Center, lipgloss.Center,
+			dialog,
+		)
+	}
+
 	return bg
 }
 
@@ -899,6 +995,8 @@ func (m Model) renderHeader() string {
 		modeStr = th.SearchActive.Render(" SEARCH: " + m.searchQuery + "█")
 	case modeDelete:
 		modeStr = th.StatusErr.Render(" DELETE?")
+	case modeChangelog:
+		modeStr = th.StatusKey.Render(" CHANGELOG")
 	}
 
 	left := logo + sep + desc + modeStr
@@ -1078,9 +1176,19 @@ func (m Model) renderDetail(w, h int) string {
 	// Body
 	body := n.Body
 	if body == "" {
-		body = "(empty)"
+		parts = append(parts, th.DetailBody.Width(innerW).Render("(empty)"))
+	} else {
+		rendered := body
+		if renderer, err := glamour.NewTermRenderer(
+			glamour.WithStandardStyle(m.theme.GlamourStyle),
+			glamour.WithWordWrap(innerW),
+		); err == nil {
+			if out, err := renderer.Render(body); err == nil {
+				rendered = strings.TrimRight(out, "\n")
+			}
+		}
+		parts = append(parts, rendered)
 	}
-	parts = append(parts, th.DetailBody.Width(innerW).Render(body))
 
 	content := strings.Join(parts, "\n")
 
@@ -1125,7 +1233,12 @@ func (m Model) renderEditor(w, h int) string {
 		}
 		before := string(runes[:pos])
 		if pos < len(runes) {
-			cur := th.Cursor.Render(string(runes[pos]))
+			ch := runes[pos]
+			if ch == '\n' {
+				// Cursor is on an empty line: show a space block then the newline
+				return before + th.Cursor.Render(" ") + "\n" + string(runes[pos+1:])
+			}
+			cur := th.Cursor.Render(string(ch))
 			after := string(runes[pos+1:])
 			return before + cur + after
 		}
@@ -1195,6 +1308,7 @@ func (m Model) renderStatus() string {
 			th.StatusKey.Render("p") + " pin",
 			th.StatusKey.Render("/") + " search",
 			th.StatusKey.Render("T") + " theme",
+			th.StatusKey.Render("V") + " changelog",
 			th.StatusKey.Render("?") + " help",
 			th.StatusKey.Render("q") + " quit",
 		}
@@ -1205,6 +1319,7 @@ func (m Model) renderStatus() string {
 			th.StatusKey.Render("e") + " edit",
 			th.StatusKey.Render("d") + " del",
 			th.StatusKey.Render("T") + " theme",
+			th.StatusKey.Render("V") + " changelog",
 			th.StatusKey.Render("esc/h") + " back",
 		}
 		return th.StatusBar.Render(strings.Join(keys, sep))
@@ -1295,6 +1410,7 @@ func (m Model) renderHelp() string {
 		}},
 		{"App", []binding{
 			{"T", "Cycle theme (" + m.theme.Name + ")"},
+			{"V", "What's new (changelog)"},
 			{"?", "Toggle help"},
 			{"q / Ctrl+C", "Quit"},
 		}},
@@ -1359,7 +1475,7 @@ func (m Model) renderHelp() string {
 	var rightRows []string
 	rightRows = append(rightRows, th.HelpTitle.Render("About nnn"), "")
 
-	about := "nnn is a keyboard-driven TUI for managing notes in the terminal — built with Bubble Tea and lipgloss, because plain text and fast navigation are all you really need."
+	about := "nnn is a keyboard-driven TUI for managing notes in the terminal — built with Bubble Tea and lipgloss, because Markdown and fast navigation are all you really need."
 	for _, l := range wordWrap(about, wrapW) {
 		rightRows = append(rightRows, th.HelpDesc.Render(l))
 	}
@@ -1481,4 +1597,134 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ── Changelog overlay ─────────────────────────────────────────────────────────
+
+func (m Model) handleChangelogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q", "V", "enter":
+		m.mode = modeList
+		m.changelogOffset = 0
+		ver := strings.TrimPrefix(m.version, "v")
+		return m, func() tea.Msg { return saveChangelogSeenMsg{version: ver} }
+	case "ctrl+c":
+		return m, tea.Quit
+	case "j", "down":
+		m.changelogOffset++
+	case "k", "up":
+		if m.changelogOffset > 0 {
+			m.changelogOffset--
+		}
+	case "g", "home":
+		m.changelogOffset = 0
+	case "G", "end":
+		m.changelogOffset = 9999
+	}
+	return m, nil
+}
+
+func (m Model) renderChangelog() string {
+	th := m.theme
+
+	dialogW := m.width - 8
+	if dialogW > 90 {
+		dialogW = 90
+	}
+	if dialogW < 30 {
+		dialogW = 30
+	}
+	dialogH := m.height - 8
+	if dialogH > 30 {
+		dialogH = 30
+	}
+	if dialogH < 8 {
+		dialogH = 8
+	}
+
+	innerW := dialogW - 8
+	if innerW < 20 {
+		innerW = 20
+	}
+
+	ver := strings.TrimPrefix(m.version, "v")
+	entries := changelogEntries
+
+	var rows []string
+	rows = append(rows, th.HelpTitle.Render("What's new in v"+ver), "")
+
+	for _, entry := range entries {
+		wrapW := innerW - 3
+		if wrapW < 10 {
+			wrapW = 10
+		}
+		words := strings.Fields(entry)
+		line := ""
+		first := true
+		for _, word := range words {
+			if line == "" {
+				line = word
+			} else if utf8.RuneCountInString(line)+1+utf8.RuneCountInString(word) <= wrapW {
+				line += " " + word
+			} else {
+				prefix := "   "
+				if first {
+					prefix = th.StatusKey.Render("·") + "  "
+					first = false
+				}
+				rows = append(rows, prefix+th.HelpDesc.Render(line))
+				line = word
+			}
+		}
+		if line != "" {
+			prefix := "   "
+			if first {
+				prefix = th.StatusKey.Render("·") + "  "
+			}
+			rows = append(rows, prefix+th.HelpDesc.Render(line))
+		}
+		rows = append(rows, "")
+	}
+
+	rows = append(rows, th.DetailMeta.Render("esc / q / enter: close  ·  j/k: scroll  ·  V: reopen anytime"))
+
+	totalRows := len(rows)
+
+	const overhead = 2
+	visible := dialogH - overhead
+	if visible < 1 {
+		visible = 1
+	}
+
+	off := m.changelogOffset
+	maxOff := totalRows - visible
+	if maxOff < 0 {
+		maxOff = 0
+	}
+	if off > maxOff {
+		off = maxOff
+	}
+	if off < 0 {
+		off = 0
+	}
+	end := off + visible
+	if end > totalRows {
+		end = totalRows
+	}
+	slice := rows[off:end]
+	for len(slice) < visible {
+		slice = append(slice, "")
+	}
+
+	if totalRows > visible {
+		indicator := th.DetailMeta.Render(fmt.Sprintf("%d%%", (off+1)*100/totalRows))
+		titleRow := slice[0]
+		pad := innerW - lipgloss.Width(titleRow) - lipgloss.Width(indicator)
+		if pad > 0 {
+			slice[0] = titleRow + strings.Repeat(" ", pad) + indicator
+		}
+	}
+
+	content := strings.Join(slice, "\n")
+	return th.HelpOverlay.Width(dialogW - 2).Height(dialogH - 2).Render(content)
 }

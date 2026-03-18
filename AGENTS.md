@@ -38,7 +38,8 @@ nnn/
 │   │   └── configdir_windows.go # AppData config dir for Windows
 │   ├── tui/
 │   │   ├── model.go         # Bubble Tea Model: state machine, Update, View, cloud cmds
-│   │   └── styles.go        # Theme struct + 7 built-in themes
+│   │   ├── styles.go        # Theme struct + 7 built-in themes
+│   │   └── changelog.go     # Flat []string of What's New entries shown in the changelog overlay
 │   └── updater/updater.go   # GitHub release check (throttled to once/day)
 ├── .goreleaser.yaml         # Cross-compile + Homebrew tap release config
 ├── Makefile                 # Developer targets (build, test, run, release)
@@ -147,6 +148,7 @@ type Config struct {
     Theme           string    `json:"theme,omitempty"`
     LastUpdateCheck time.Time `json:"last_update_check,omitempty"`
     LatestVersion   string    `json:"latest_version,omitempty"`
+    LastSeenVersion string    `json:"last_seen_version,omitempty"`
     Token           string    `json:"token,omitempty"`
     Email           string    `json:"email,omitempty"`
 }
@@ -157,6 +159,7 @@ type Config struct {
 | `Theme` | Last selected theme name (used as TUI default) |
 | `LastUpdateCheck` | Timestamp of last GitHub release check |
 | `LatestVersion` | Cached latest release tag from GitHub API |
+| `LastSeenVersion` | Last version for which the changelog overlay was shown; written on dismiss |
 | `Token` | Cloud auth JWT; empty when logged out |
 | `Email` | Cloud account email; empty when logged out |
 
@@ -412,8 +415,9 @@ The TUI behavior is entirely determined by the `mode` field (an `int`):
 | 4 | `modeSearch` | Live-filter search input active |
 | 5 | `modeDelete` | Awaiting y/n delete confirmation |
 | 6 | `modeHelp` | Full-screen help overlay |
+| 7 | `modeChangelog` | What's New changelog overlay |
 
-Each mode has a dedicated key handler function: `handleListKey`, `handleDetailKey`, `handleEditKey`, `handleSearchKey`, `handleDeleteKey`, `handleHelpKey`.
+Each mode has a dedicated key handler function: `handleListKey`, `handleDetailKey`, `handleEditKey`, `handleSearchKey`, `handleDeleteKey`, `handleHelpKey`, `handleChangelogKey`.
 
 #### Message Types
 
@@ -424,6 +428,7 @@ Each mode has a dedicated key handler function: `handleListKey`, `handleDetailKe
 | `savedMsg{}` | "Note saved" status; clears after 2 s |
 | `statusClearMsg{}` | Clears the status bar |
 | `saveConfigMsg{theme}` | Persists a theme change to `config.json` |
+| `saveChangelogSeenMsg{version}` | Persists `LastSeenVersion` to `config.json` on changelog dismiss |
 | `syncDoneMsg{result, err}` | Delivered by `cmdCloudSync`; triggers note reload and status summary |
 
 #### Cloud `tea.Cmd` helpers
@@ -453,6 +458,7 @@ All cloud commands are fire-and-forget. Local operations succeed first; cloud er
 | List | `r` | Reload from disk |
 | List | `/` | Start search |
 | List | `T` | Cycle theme |
+| List | `V` | Open changelog overlay |
 | List | `?` | Help overlay |
 | List | `q / Ctrl+C` | Quit |
 | Detail | `j / k` | Scroll body |
@@ -460,8 +466,10 @@ All cloud commands are fire-and-forget. Local operations succeed first; cloud er
 | Detail | `d` | Delete |
 | Detail | `p` | Toggle pin |
 | Detail | `T` | Cycle theme |
+| Detail | `V` | Open changelog overlay |
 | Detail | `h / Esc` | Back to list |
 | Editor | `Tab` | Cycle field (Title → Body → Tags) |
+| Editor | `↑ / ↓` | Move cursor between lines (body field) |
 | Editor | `Ctrl+S` | Save |
 | Editor | `Ctrl+W` | Save and open detail |
 | Editor | `Esc` | Cancel |
@@ -475,6 +483,9 @@ All cloud commands are fire-and-forget. Local operations succeed first; cloud er
 | Help overlay | `j / k` | Scroll |
 | Help overlay | `g / G` | Top / bottom |
 | Help overlay | `Esc / ? / q` | Close |
+| Changelog overlay | `j / k` | Scroll |
+| Changelog overlay | `g / G` | Top / bottom |
+| Changelog overlay | `Esc / q / V / Enter` | Close |
 
 ---
 
@@ -506,6 +517,10 @@ type Theme struct {
 
     // App header
     AppHeader, AppVersion lipgloss.Style
+
+    // GlamourStyle is the glamour style name used when rendering Markdown in
+    // the detail view (e.g. "dark", "light", "dracula", "tokyo-night").
+    GlamourStyle string
 }
 ```
 
@@ -572,6 +587,7 @@ This is handled automatically by the `Makefile` (`make build`) and GoReleaser (`
 |---|---|
 | `github.com/charmbracelet/bubbletea` | TUI framework (Elm-architecture event loop) |
 | `github.com/charmbracelet/lipgloss` | Terminal styling and layout |
+| `github.com/charmbracelet/glamour` | Markdown rendering in the detail view |
 | `github.com/spf13/cobra` | CLI command/flag framework |
 | `github.com/google/uuid` | UUID v4 generation for note IDs |
 
