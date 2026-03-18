@@ -4,7 +4,7 @@
 
 A fast, keyboard-driven terminal note manager built with [Bubble Tea](https://github.com/charmbracelet/bubbletea). Notes are stored locally as human-readable JSON and optionally synced to the cloud via [nnn.rocks](https://nnn.rocks).
 
-Two ways to use it: open the full TUI with `nnn`, or drive it from the command line for scripting and quick capture.
+Two ways to use it: open the full TUI with `nnn`, or drive it from the command line for scripting and quick capture. Note bodies are written and rendered as **Markdown**.
 
 ---
 
@@ -93,7 +93,7 @@ When logged in to nnn.rocks the TUI performs a background sync on startup and sh
 The screen is split into two panels:
 
 - **Left** — scrollable list of all notes, sorted by pin status then last updated. Pinned notes are marked with `⏺`.
-- **Right** — the selected note's full content (title, tags, timestamps, body), or the editor when creating/editing.
+- **Right** — the selected note's full content (title, tags, timestamps, body rendered as Markdown), or the editor when creating/editing.
 
 ### Navigation
 
@@ -118,11 +118,12 @@ The screen is split into two panels:
 
 ### Editor
 
-Press `n` (new) or `e` (edit) to enter the editor. There are three fields — cycle through them with `Tab`.
+Press `n` (new) or `e` (edit) to enter the editor. There are three fields — cycle through them with `Tab`. The body field supports Markdown; it is rendered with syntax highlighting in the detail view.
 
 | Key | Action |
 |---|---|
 | `Tab` | Cycle: Title → Body → Tags |
+| `↑` / `↓` | Move cursor between lines (body field) |
 | `Ctrl+S` | Save and return to list |
 | `Ctrl+W` | Save and open detail view |
 | `Esc` | Cancel (discard changes) |
@@ -147,6 +148,7 @@ Search matches against both title and body (case-insensitive).
 | Key | Action |
 |---|---|
 | `T` | Cycle through themes (synced to cloud when logged in) |
+| `V` | Open What's New changelog overlay |
 | `?` | Toggle help overlay (scrollable with `j`/`k`) |
 | `q` / `Ctrl+C` | Quit |
 
