@@ -1,6 +1,9 @@
 package tui
 
-import "github.com/charmbracelet/lipgloss"
+import (
+	"github.com/charmbracelet/glamour/styles"
+	"github.com/charmbracelet/lipgloss"
+)
 
 // ── Theme definition ──────────────────────────────────────────────────────────
 
@@ -52,6 +55,10 @@ type Theme struct {
 	// ── App header ──────────────────────────────────────────────────────────
 	AppHeader  lipgloss.Style
 	AppVersion lipgloss.Style
+
+	// GlamourStyle is the glamour style name used when rendering markdown in
+	// the detail view (e.g. "dark", "light", "dracula", "tokyo-night").
+	GlamourStyle string
 }
 
 // palette is the minimal set of named colors a theme needs to define.
@@ -76,7 +83,7 @@ type palette struct {
 }
 
 // newTheme constructs the full set of lipgloss styles from a palette.
-func newTheme(name string, p palette) Theme {
+func newTheme(name string, p palette, glamourStyle string) Theme {
 	return Theme{
 		Name: name,
 
@@ -197,6 +204,8 @@ func newTheme(name string, p palette) Theme {
 		AppVersion: lipgloss.NewStyle().
 			Foreground(p.muted).
 			PaddingLeft(1),
+
+		GlamourStyle: glamourStyle,
 	}
 }
 
@@ -221,7 +230,7 @@ var ThemeAmber = newTheme("amber", palette{
 	success:    lipgloss.Color("#6ec994"),
 	title:      lipgloss.Color("#f0c070"),
 	subtle:     lipgloss.Color("#6b7080"),
-})
+}, styles.DarkStyle)
 
 // ThemeCatppuccin is Catppuccin Mocha — warm dark with pastel accents.
 var ThemeCatppuccin = newTheme("catppuccin", palette{
@@ -242,7 +251,7 @@ var ThemeCatppuccin = newTheme("catppuccin", palette{
 	success:    lipgloss.Color("#a6e3a1"),
 	title:      lipgloss.Color("#f5c2e7"),
 	subtle:     lipgloss.Color("#585b70"),
-})
+}, styles.DarkStyle)
 
 // ThemeTokyoNight is Tokyo Night — cool blue/purple dark theme.
 var ThemeTokyoNight = newTheme("tokyo-night", palette{
@@ -263,7 +272,7 @@ var ThemeTokyoNight = newTheme("tokyo-night", palette{
 	success:    lipgloss.Color("#9ece6a"),
 	title:      lipgloss.Color("#bb9af7"),
 	subtle:     lipgloss.Color("#414868"),
-})
+}, styles.TokyoNightStyle)
 
 // ThemeGruvbox is Gruvbox Dark — retro warm earth tones.
 var ThemeGruvbox = newTheme("gruvbox", palette{
@@ -284,7 +293,7 @@ var ThemeGruvbox = newTheme("gruvbox", palette{
 	success:    lipgloss.Color("#b8bb26"),
 	title:      lipgloss.Color("#fabd2f"),
 	subtle:     lipgloss.Color("#7c6f64"),
-})
+}, styles.DarkStyle)
 
 // ThemeNord is Nord — arctic bluish dark with cool pale colors.
 var ThemeNord = newTheme("nord", palette{
@@ -305,7 +314,7 @@ var ThemeNord = newTheme("nord", palette{
 	success:    lipgloss.Color("#a3be8c"),
 	title:      lipgloss.Color("#81a1c1"),
 	subtle:     lipgloss.Color("#616e88"),
-})
+}, styles.DarkStyle)
 
 // ThemeSolarized is Solarized Light — light background with warm and cool accents.
 var ThemeSolarized = newTheme("solarized", palette{
@@ -326,7 +335,7 @@ var ThemeSolarized = newTheme("solarized", palette{
 	success:    lipgloss.Color("#859900"),
 	title:      lipgloss.Color("#073642"),
 	subtle:     lipgloss.Color("#839496"),
-})
+}, styles.LightStyle)
 
 // ThemeDracula is Dracula — dark theme with vibrant purple and pink accents.
 var ThemeDracula = newTheme("dracula", palette{
@@ -347,7 +356,7 @@ var ThemeDracula = newTheme("dracula", palette{
 	success:    lipgloss.Color("#50fa7b"),
 	title:      lipgloss.Color("#ff79c6"),
 	subtle:     lipgloss.Color("#6272a4"),
-})
+}, styles.DraculaStyle)
 
 // ── Theme registry ────────────────────────────────────────────────────────────
 

@@ -32,6 +32,10 @@ type Config struct {
 	LastUpdateCheck time.Time `json:"last_update_check,omitempty"`
 	LatestVersion   string    `json:"latest_version,omitempty"`
 
+	// LastSeenVersion is the last version for which the changelog was shown.
+	// When the running version differs, the changelog popup is triggered once.
+	LastSeenVersion string `json:"last_seen_version,omitempty"`
+
 	// Cloud auth — set by "nnn auth login", cleared by "nnn auth logout".
 	Token string `json:"token,omitempty"`
 	Email string `json:"email,omitempty"`
