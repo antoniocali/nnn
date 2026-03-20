@@ -20,14 +20,15 @@ import (
 type mode int
 
 const (
-	modeList      mode = iota // navigating the list
-	modeDetail                // reading detail (right panel focused)
-	modeEdit                  // editing an existing note
-	modeNew                   // creating a new note
-	modeSearch                // typing a search query
-	modeDelete                // confirm delete
-	modeHelp                  // help overlay
-	modeChangelog             // what's new overlay
+	modeList             mode = iota // navigating the list
+	modeDetail                       // reading detail (right panel focused)
+	modeEdit                         // editing an existing note
+	modeNew                          // creating a new note
+	modeSearch                       // typing a search query
+	modeDelete                       // confirm delete
+	modeHelp                         // help overlay
+	modeChangelogLatest              // what's new overlay
+	modeChangelogHistory             // Full changelog
 )
 
 // ── Messages ─────────────────────────────────────────────────────────────────
@@ -172,7 +173,7 @@ func New(store *storage.Store, themeName string, version string) (Model, error) 
 		showChangelog: showChangelog,
 	}
 	if showChangelog {
-		m.mode = modeChangelog
+		m.mode = modeChangelogLatest
 	}
 	return m, nil
 }
@@ -276,7 +277,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleDeleteKey(msg)
 	case modeHelp:
 		return m.handleHelpKey(msg)
-	case modeChangelog:
+	case modeChangelogLatest:
+		return m.handleChangelogKey(msg)
+	case modeChangelogHistory:
 		return m.handleChangelogKey(msg)
 	}
 	return m, nil
@@ -391,7 +394,7 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case "V":
-		m.mode = modeChangelog
+		m.mode = modeChangelogHistory
 		m.changelogOffset = 0
 	}
 	return m, nil
@@ -472,7 +475,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case "V":
-		m.mode = modeChangelog
+		m.mode = modeChangelogHistory
 		m.changelogOffset = 0
 	}
 	return m, nil
@@ -963,8 +966,8 @@ func (m Model) View() string {
 	}
 
 	// Changelog overlay: same floating pattern as help.
-	if m.mode == modeChangelog {
-		dialog := m.renderChangelog()
+	if m.mode == modeChangelogLatest || m.mode == modeChangelogHistory {
+		dialog := m.renderChangelog(m.mode == modeChangelogLatest)
 		return lipgloss.Place(m.width, m.height,
 			lipgloss.Center, lipgloss.Center,
 			dialog,
@@ -995,8 +998,10 @@ func (m Model) renderHeader() string {
 		modeStr = th.SearchActive.Render(" SEARCH: " + m.searchQuery + "█")
 	case modeDelete:
 		modeStr = th.StatusErr.Render(" DELETE?")
-	case modeChangelog:
+	case modeChangelogHistory:
 		modeStr = th.StatusKey.Render(" CHANGELOG")
+	case modeChangelogLatest:
+		modeStr = th.StatusKey.Render(" WHAT'S NEW")
 	}
 
 	left := logo + sep + desc + modeStr
@@ -1604,10 +1609,18 @@ func max(a, b int) int {
 func (m Model) handleChangelogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q", "V", "enter":
+		wasLatest := m.mode == modeChangelogLatest
 		m.mode = modeList
 		m.changelogOffset = 0
-		ver := strings.TrimPrefix(m.version, "v")
-		return m, func() tea.Msg { return saveChangelogSeenMsg{version: ver} }
+		// Only persist LastSeenVersion when dismissing the "What's New" overlay
+		// (shown once on first launch after an upgrade). The history view must
+		// not update it, or the user would never see the overlay again after
+		// closing the history.
+		if wasLatest {
+			ver := strings.TrimPrefix(m.version, "v")
+			return m, func() tea.Msg { return saveChangelogSeenMsg{version: ver} }
+		}
+		return m, nil
 	case "ctrl+c":
 		return m, tea.Quit
 	case "j", "down":
@@ -1624,7 +1637,7 @@ func (m Model) handleChangelogKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) renderChangelog() string {
+func (m Model) renderChangelog(whatsNew bool) string {
 	th := m.theme
 
 	dialogW := m.width - 8
@@ -1648,50 +1661,68 @@ func (m Model) renderChangelog() string {
 	}
 
 	ver := strings.TrimPrefix(m.version, "v")
-	entries := changelogEntries
 
-	var rows []string
-	rows = append(rows, th.HelpTitle.Render("What's new in v"+ver), "")
-
-	for _, entry := range entries {
-		wrapW := innerW - 3
-		if wrapW < 10 {
-			wrapW = 10
-		}
-		words := strings.Fields(entry)
-		line := ""
-		first := true
-		for _, word := range words {
-			if line == "" {
-				line = word
-			} else if utf8.RuneCountInString(line)+1+utf8.RuneCountInString(word) <= wrapW {
-				line += " " + word
-			} else {
-				prefix := "   "
-				if first {
-					prefix = th.StatusKey.Render("·") + "  "
-					first = false
-				}
-				rows = append(rows, prefix+th.HelpDesc.Render(line))
-				line = word
-			}
-		}
-		if line != "" {
-			prefix := "   "
-			if first {
-				prefix = th.StatusKey.Render("·") + "  "
-			}
-			rows = append(rows, prefix+th.HelpDesc.Render(line))
-		}
-		rows = append(rows, "")
+	// Build a working copy of the entries to avoid mutating the global slice.
+	// The first entry always represents the current build; substitute the actual
+	// running version so changelog.go never needs to be kept in sync with ldflags.
+	// When showing "What's New" only the latest entry is included.
+	var entries []ChangeLogEntry
+	if whatsNew {
+		first := changelogEntries[0]
+		first.Version = ver
+		entries = []ChangeLogEntry{first}
+	} else {
+		entries = make([]ChangeLogEntry, len(changelogEntries))
+		copy(entries, changelogEntries)
+		entries[0].Version = ver // inject running version for the first entry here too
 	}
 
-	rows = append(rows, th.DetailMeta.Render("esc / q / enter: close  ·  j/k: scroll  ·  V: reopen anytime"))
+	var rows []string
+	for _, entry := range entries {
+		// Section header + blank line separator.
+		rows = append(rows, th.HelpTitle.Render("What's new in v"+strings.TrimPrefix(entry.Version, "v")))
+		rows = append(rows, "")
+		for _, change := range entry.Description {
+			wrapW := innerW - 3
+			if wrapW < 10 {
+				wrapW = 10
+			}
+			words := strings.Fields(change)
+			line := ""
+			firstWord := true // reset per-entry so each bullet gets its own "·"
+			for _, word := range words {
+				if line == "" {
+					line = word
+				} else if utf8.RuneCountInString(line)+1+utf8.RuneCountInString(word) <= wrapW {
+					line += " " + word
+				} else {
+					prefix := "   "
+					if firstWord {
+						prefix = th.StatusKey.Render("·") + "  "
+						firstWord = false
+					}
+					rows = append(rows, prefix+th.HelpDesc.Render(line))
+					line = word
+				}
+			}
+			if line != "" {
+				prefix := "   "
+				if firstWord {
+					prefix = th.StatusKey.Render("·") + "  "
+				}
+				rows = append(rows, prefix+th.HelpDesc.Render(line))
+			}
+			rows = append(rows, "")
+		}
+	}
+
+	footer := th.DetailMeta.Render("esc / q / enter: close  ·  j/k: scroll  ·  V: reopen anytime")
 
 	totalRows := len(rows)
 
+	// Reserve 1 line for the pinned footer and 2 for the border overhead.
 	const overhead = 2
-	visible := dialogH - overhead
+	visible := dialogH - overhead - 1 // -1 for pinned footer
 	if visible < 1 {
 		visible = 1
 	}
@@ -1724,6 +1755,10 @@ func (m Model) renderChangelog() string {
 			slice[0] = titleRow + strings.Repeat(" ", pad) + indicator
 		}
 	}
+
+	// Append the pinned footer after the scrollable slice so it always sits
+	// flush at the bottom of the dialog regardless of scroll position.
+	slice = append(slice, footer)
 
 	content := strings.Join(slice, "\n")
 	return th.HelpOverlay.Width(dialogW - 2).Height(dialogH - 2).Render(content)
