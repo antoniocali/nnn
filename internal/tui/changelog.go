@@ -8,6 +8,9 @@ type ChangeLogEntry struct {
 // changelogEntries is the flat list of recent changes shown in the What's New
 // overlay. Add a new entry at the top of the slice for each release.
 var changelogEntries = []ChangeLogEntry{
+	{Version: "v1.1.2", Description: []string{
+		"Click to position cursor — click anywhere in the editor to move the cursor to that character",
+	}},
 	{Version: "v1.1.1", Description: []string{
 		"Fixed changelog dialog footer floating instead of pinned to the bottom",
 		"Changelog now has two modes: What's New shown once on startup for new versions, and full history accessible anytime with V",

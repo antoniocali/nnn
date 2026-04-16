@@ -257,6 +257,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case tea.MouseMsg:
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
+			if m.mode == modeEdit || m.mode == modeNew {
+				return m.handleEditorClick(msg.X, msg.Y)
+			}
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -531,6 +539,97 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	}
+	return m, nil
+}
+
+// ── Editor mouse click ───────────────────────────────────────────────────────
+
+// handleEditorClick repositions the editor cursor to the character that was
+// clicked. It translates screen coordinates into a (field, cursorPos) pair.
+func (m Model) handleEditorClick(mx, my int) (tea.Model, tea.Cmd) {
+	listW := max(22, m.width*30/100)
+
+	// Editor panel content origin on screen:
+	//   X = listW (list panel) + 1 (gap) + 1 (border) + 1 (padding)
+	//   Y = 1 (header) + 1 (top border)
+	contentOriginX := listW + 3
+	contentOriginY := 2
+
+	col := mx - contentOriginX
+	row := my - contentOriginY
+
+	if col < 0 || row < 0 {
+		return m, nil
+	}
+
+	// The label prefix "Title: " / "Tags : " occupies 7 visual columns.
+	const labelPrefixW = 7
+
+	bodyLines := strings.Split(m.editBody, "\n")
+	bodyLineCount := len(bodyLines)
+
+	// Editor content layout:
+	//   Row 0:                        Title: <title>
+	//   Row 1:                        ───────────────
+	//   Row 2:                        Body :
+	//   Rows 3 .. 3+bodyLineCount-1:  <body text>
+	//   Row 3+bodyLineCount:          ───────────────
+	//   Row 3+bodyLineCount+1:        Tags : <tags>
+
+	switch {
+	case row == 0:
+		// Click on title line.
+		m.editField = 0
+		pos := col - labelPrefixW
+		if pos < 0 {
+			pos = 0
+		}
+		runes := []rune(m.editTitle)
+		if pos > len(runes) {
+			pos = len(runes)
+		}
+		m.editCursorPos = pos
+
+	case row == 2:
+		// Click on "Body : " label → position at start of body.
+		m.editField = 1
+		m.editCursorPos = 0
+
+	case row >= 3 && row < 3+bodyLineCount:
+		// Click inside body text.
+		m.editField = 1
+		lineIdx := row - 3
+
+		// Sum rune lengths of all preceding lines (+1 for each '\n').
+		charPos := 0
+		for i := 0; i < lineIdx; i++ {
+			charPos += utf8.RuneCountInString(bodyLines[i]) + 1
+		}
+
+		colInLine := col
+		if colInLine < 0 {
+			colInLine = 0
+		}
+		lineRuneCount := utf8.RuneCountInString(bodyLines[lineIdx])
+		if colInLine > lineRuneCount {
+			colInLine = lineRuneCount
+		}
+		m.editCursorPos = charPos + colInLine
+
+	case row == 3+bodyLineCount+1:
+		// Click on tags line.
+		m.editField = 2
+		pos := col - labelPrefixW
+		if pos < 0 {
+			pos = 0
+		}
+		runes := []rune(m.editTags)
+		if pos > len(runes) {
+			pos = len(runes)
+		}
+		m.editCursorPos = pos
+	}
+
 	return m, nil
 }
 
