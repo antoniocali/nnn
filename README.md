@@ -124,6 +124,9 @@ Press `n` (new) or `e` (edit) to enter the editor. There are three fields — cy
 |---|---|
 | `Tab` | Cycle: Title → Body → Tags |
 | `↑` / `↓` | Move cursor between lines (body field) |
+| `Ctrl+B` | Bold — wraps the cursor in `**` (body field only) |
+| `Ctrl+U` | Italic — wraps the cursor in `_` (body field only) |
+| `Ctrl+T` | Cycle the current line through H1 → H2 → H3 → plain (body field only) |
 | `Ctrl+S` | Save and return to list |
 | `Ctrl+W` | Save and open detail view |
 | `Esc` | Cancel (discard changes) |
@@ -132,6 +135,8 @@ Press `n` (new) or `e` (edit) to enter the editor. There are three fields — cy
 | `Ctrl+E` / `End` | End of line |
 
 Tags are entered as a comma-separated string in the Tags field, e.g. `work, ideas, personal`.
+
+There's no text-selection concept in the editor, so `Ctrl+B` / `Ctrl+U` always wrap an empty span: they insert an empty marker pair (e.g. `****`) with the cursor in the middle, ready to type into. Pressing the same shortcut again while the cursor sits directly inside an empty pair removes it.
 
 ### Search
 

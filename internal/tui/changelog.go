@@ -8,6 +8,9 @@ type ChangeLogEntry struct {
 // changelogEntries is the flat list of recent changes shown in the What's New
 // overlay. Add a new entry at the top of the slice for each release.
 var changelogEntries = []ChangeLogEntry{
+	{Version: "v1.2.0", Description: []string{
+		"Markdown formatting shortcuts in the editor — Ctrl+B for bold, Ctrl+U for italic, Ctrl+T to cycle a line through H1/H2/H3",
+	}},
 	{Version: "v1.1.2", Description: []string{
 		"Click to position cursor — click anywhere in the editor to move the cursor to that character",
 	}},

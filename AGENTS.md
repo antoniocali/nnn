@@ -470,6 +470,9 @@ All cloud commands are fire-and-forget. Local operations succeed first; cloud er
 | Detail | `h / Esc` | Back to list |
 | Editor | `Tab` | Cycle field (Title → Body → Tags) |
 | Editor | `↑ / ↓` | Move cursor between lines (body field) |
+| Editor | `Ctrl+B` | Toggle bold (`**`) around cursor — body field only |
+| Editor | `Ctrl+U` | Toggle italic (`_`) around cursor — body field only |
+| Editor | `Ctrl+T` | Cycle current line H1 → H2 → H3 → plain — body field only |
 | Editor | `Ctrl+S` | Save |
 | Editor | `Ctrl+W` | Save and open detail |
 | Editor | `Esc` | Cancel |
@@ -604,3 +607,4 @@ This is handled automatically by the `Makefile` (`make build`) and GoReleaser (`
 - **Fire-and-forget cloud ops**: Cloud commands in the TUI run in background goroutines. Local saves always succeed first; cloud errors surface via `cloudErrMsg` in the status bar and never block the user.
 - **Error classification**: All cloud errors must pass through `cloud.ClassifyError(err)` before being shown to users — never show raw errors.
 - **Cloud error routing**: TUI cloud errors go to the status bar as `cloudErrMsg`; CLI cloud errors go to `os.Stderr` followed by `os.Exit(1)`.
+- **No text selection in the editor**: `toggleWrap`/`cycleHeading` (`internal/tui/model.go`) implement the Markdown formatting shortcuts (`Ctrl+B`/`Ctrl+U`/`Ctrl+T`) by inserting an empty marker pair around the single cursor position rather than wrapping a selection — there is no selection concept anywhere in the editor.
