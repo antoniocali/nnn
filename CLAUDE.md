@@ -23,9 +23,9 @@ make check         # fmt + vet + test — run this before considering a change d
 make build-all     # cross-compile all platforms into dist/
 ```
 
-Run a single test: `go test ./internal/storage/... -run TestName -v`.
+Run a single test: `go test ./internal/tui/... -run TestName -v`.
 
-There are currently no `*_test.go` files in the repo — `make test` passes vacuously until tests are added.
+Tests live in `internal/tui/` (Bubble Tea `Update` is driven directly with real `tea.KeyMsg` values — no pty/tmux needed to exercise key handling). Other packages have no `*_test.go` files yet.
 
 No separate `.cursor/rules`, `.cursorrules`, or `.github/copilot-instructions.md` exist in this repo.
 

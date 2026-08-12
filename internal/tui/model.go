@@ -526,6 +526,24 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.editCursorPos = utf8.RuneCountInString(m.editTitle)
 		}
 
+	case "ctrl+b":
+		// Bold — body field only.
+		if m.editField == 1 {
+			m.editBody = toggleWrap(m.editBody, &m.editCursorPos, "**")
+		}
+
+	case "ctrl+u":
+		// Italic — body field only.
+		if m.editField == 1 {
+			m.editBody = toggleWrap(m.editBody, &m.editCursorPos, "_")
+		}
+
+	case "ctrl+t":
+		// Cycle the current line through H1 → H2 → H3 → plain — body field only.
+		if m.editField == 1 {
+			m.editBody = cycleHeading(m.editBody, &m.editCursorPos)
+		}
+
 	default:
 		switch m.editField {
 		case 0:
@@ -1026,6 +1044,90 @@ func handleTextInput(text string, cursorPos *int, msg tea.KeyMsg) string {
 	return string(runes)
 }
 
+// ── Markdown formatting shortcuts ───────────────────────────────────────────
+
+// toggleWrap wraps the cursor position in a pair of markers (e.g. "**" for
+// bold, "_" for italic), leaving the cursor between them so the next
+// keystrokes land inside the pair. If the cursor already sits directly
+// between an empty pair of the same marker, the pair is removed instead —
+// a quick way to undo an accidental press. There is no text-selection
+// concept in this editor, so unlike GUI editors this always operates on an
+// empty span rather than wrapping already-typed text.
+func toggleWrap(text string, cursorPos *int, marker string) string {
+	runes := []rune(text)
+	pos := *cursorPos
+	if pos > len(runes) {
+		pos = len(runes)
+	}
+	mk := []rune(marker)
+	ml := len(mk)
+
+	if pos >= ml && pos+ml <= len(runes) &&
+		string(runes[pos-ml:pos]) == marker &&
+		string(runes[pos:pos+ml]) == marker {
+		runes = append(runes[:pos-ml], runes[pos+ml:]...)
+		*cursorPos = pos - ml
+		return string(runes)
+	}
+
+	out := make([]rune, 0, len(runes)+2*ml)
+	out = append(out, runes[:pos]...)
+	out = append(out, mk...)
+	out = append(out, mk...)
+	out = append(out, runes[pos:]...)
+	*cursorPos = pos + ml
+	return string(out)
+}
+
+// headingPrefixes maps heading level (0 = plain line) to its Markdown prefix.
+var headingPrefixes = []string{"", "# ", "## ", "### "}
+
+// cycleHeading rewrites the line the cursor is on, advancing it through
+// plain → H1 → H2 → H3 → plain on each call. The cursor is kept at the same
+// offset within the line content, shifted by the change in prefix length.
+func cycleHeading(text string, cursorPos *int) string {
+	runes := []rune(text)
+	pos := *cursorPos
+	if pos > len(runes) {
+		pos = len(runes)
+	}
+
+	lineStart := pos
+	for lineStart > 0 && runes[lineStart-1] != '\n' {
+		lineStart--
+	}
+	lineEnd := lineStart
+	for lineEnd < len(runes) && runes[lineEnd] != '\n' {
+		lineEnd++
+	}
+	line := string(runes[lineStart:lineEnd])
+
+	curLevel := 0
+	for lvl := 3; lvl >= 1; lvl-- {
+		if strings.HasPrefix(line, headingPrefixes[lvl]) {
+			curLevel = lvl
+			break
+		}
+	}
+	nextLevel := (curLevel + 1) % len(headingPrefixes)
+	oldPrefix := headingPrefixes[curLevel]
+	newPrefix := headingPrefixes[nextLevel]
+	newLine := newPrefix + strings.TrimPrefix(line, oldPrefix)
+
+	newRunes := make([]rune, 0, len(runes)-len(oldPrefix)+len(newPrefix))
+	newRunes = append(newRunes, runes[:lineStart]...)
+	newRunes = append(newRunes, []rune(newLine)...)
+	newRunes = append(newRunes, runes[lineEnd:]...)
+
+	delta := len(newPrefix) - len(oldPrefix)
+	newPos := pos + delta
+	if minPos := lineStart + len(newPrefix); newPos < minPos {
+		newPos = minPos
+	}
+	*cursorPos = newPos
+	return string(newRunes)
+}
+
 // ── View ──────────────────────────────────────────────────────────────────────
 
 func (m Model) View() string {
@@ -1372,7 +1474,7 @@ func (m Model) renderEditor(w, h int) string {
 	tagsStr := renderField(m.editTags, 2, "(comma-separated, e.g. work, ideas)")
 
 	sep := th.DetailMeta.Render(strings.Repeat("─", innerW))
-	hint := th.DetailMeta.Render("tab: next field  ·  ctrl+s: save  ·  ctrl+w: save & view  ·  esc: cancel")
+	hint := th.DetailMeta.Render("tab: next field  ·  ctrl+b: bold  ·  ctrl+u: italic  ·  ctrl+t: heading  ·  ctrl+s: save  ·  ctrl+w: save & view  ·  esc: cancel")
 
 	titleLine := lipgloss.JoinHorizontal(lipgloss.Top, labelTitle, ": ", titleStr)
 	tagsLine := lipgloss.JoinHorizontal(lipgloss.Top, labelTags, ": ", tagsStr)
@@ -1505,6 +1607,9 @@ func (m Model) renderHelp() string {
 		}},
 		{"Editor", []binding{
 			{"Tab", "Cycle title → body → tags"},
+			{"Ctrl+B", "Bold (body only)"},
+			{"Ctrl+U", "Italic (body only)"},
+			{"Ctrl+T", "Cycle heading H1 → H2 → H3 (body only)"},
 			{"Ctrl+S", "Save note"},
 			{"Ctrl+W", "Save & view"},
 			{"Ctrl+K", "Kill to end of line"},
