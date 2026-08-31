@@ -57,6 +57,41 @@ func TestToggleWrapDoesNotRemoveNonEmptyPair(t *testing.T) {
 	}
 }
 
+func TestWrapSelectionWrapsTheGivenSpan(t *testing.T) {
+	got, pos := wrapSelection("hello world", 6, 11, "**")
+
+	want := "hello **world**"
+	if got != want {
+		t.Fatalf("wrapSelection() = %q, want %q", got, want)
+	}
+	if pos != 15 { // right after the closing "**"
+		t.Fatalf("cursorPos = %d, want 15", pos)
+	}
+}
+
+func TestWrapSelectionClampsOutOfRangeSpan(t *testing.T) {
+	got, pos := wrapSelection("hi", -3, 99, "_")
+
+	want := "_hi_"
+	if got != want {
+		t.Fatalf("wrapSelection() = %q, want %q", got, want)
+	}
+	if pos != 4 {
+		t.Fatalf("cursorPos = %d, want 4", pos)
+	}
+}
+
+func TestWrapSelectionNoOpOnEmptySpan(t *testing.T) {
+	got, pos := wrapSelection("hello", 3, 3, "**")
+
+	if got != "hello" {
+		t.Fatalf("wrapSelection() = %q, want unchanged %q", got, "hello")
+	}
+	if pos != 3 {
+		t.Fatalf("cursorPos = %d, want 3", pos)
+	}
+}
+
 func TestCycleHeadingPlainToH1ToH2ToH3ToPlain(t *testing.T) {
 	pos := 5 // somewhere inside "Hello"
 	line := "Hello"

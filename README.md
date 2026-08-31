@@ -124,8 +124,8 @@ Press `n` (new) or `e` (edit) to enter the editor. There are three fields — cy
 |---|---|
 | `Tab` | Cycle: Title → Body → Tags |
 | `↑` / `↓` | Move cursor between lines (body field) |
-| `Ctrl+B` | Bold — wraps the cursor in `**` (body field only) |
-| `Ctrl+U` | Italic — wraps the cursor in `_` (body field only) |
+| `Ctrl+B` | Bold — wraps the highlighted word (if any) or the cursor in `**` (body field only) |
+| `Ctrl+U` | Italic — wraps the highlighted word (if any) or the cursor in `_` (body field only) |
 | `Ctrl+T` | Cycle the current line through H1 → H2 → H3 → plain (body field only) |
 | `Ctrl+S` | Save and return to list |
 | `Ctrl+W` | Save and open detail view |
@@ -133,10 +133,12 @@ Press `n` (new) or `e` (edit) to enter the editor. There are three fields — cy
 | `Ctrl+K` | Delete to end of line |
 | `Ctrl+A` / `Home` | Start of line |
 | `Ctrl+E` / `End` | End of line |
+| Click | Move the cursor to that character, including on a word-wrapped body line |
+| Double-click | Highlight the word under the cursor |
 
 Tags are entered as a comma-separated string in the Tags field, e.g. `work, ideas, personal`.
 
-There's no text-selection concept in the editor, so `Ctrl+B` / `Ctrl+U` always wrap an empty span: they insert an empty marker pair (e.g. `****`) with the cursor in the middle, ready to type into. Pressing the same shortcut again while the cursor sits directly inside an empty pair removes it.
+With a word highlighted, `Ctrl+B` / `Ctrl+U` wrap that word (e.g. double-click "world" then `Ctrl+B` → `**world**`) instead of their no-selection behavior: inserting an empty marker pair (e.g. `****`) with the cursor in the middle, ready to type into. Pressing the same shortcut again while the cursor sits directly inside an empty pair removes it. Beyond feeding those two shortcuts, the highlight is visual only — there's no click-and-type replace. Any other keypress, or a plain click elsewhere, clears it.
 
 ### Search
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/antoniocali/nnn/internal/cloud"
@@ -69,6 +70,16 @@ type Model struct {
 	editField      int    // 0 = title, 1 = body, 2 = tags
 	editCursorPos  int    // cursor within current field
 	editBodyOffset int    // scroll offset for body lines
+
+	// word selection (double-click to highlight) within the editor
+	selField int // field the selection belongs to (0/1/2); -1 = no selection
+	selStart int // rune offset of the selection's start within that field
+	selEnd   int // rune offset of the selection's end (exclusive) within that field
+
+	// double-click detection for the editor
+	lastClickField int       // field of the previous mouse press; -1 if none yet
+	lastClickPos   int       // rune offset of the previous mouse press
+	lastClickAt    time.Time // wall-clock time of the previous mouse press
 
 	// search
 	searchQuery string
@@ -162,15 +173,17 @@ func New(store *storage.Store, themeName string, version string) (Model, error) 
 	}
 
 	m := Model{
-		store:         store,
-		allNotes:      ns,
-		filteredNotes: ns,
-		theme:         AllThemes[idx],
-		themeIndex:    idx,
-		version:       version,
-		email:         email,
-		token:         token,
-		showChangelog: showChangelog,
+		store:          store,
+		allNotes:       ns,
+		filteredNotes:  ns,
+		theme:          AllThemes[idx],
+		themeIndex:     idx,
+		version:        version,
+		email:          email,
+		token:          token,
+		showChangelog:  showChangelog,
+		selField:       -1,
+		lastClickField: -1,
 	}
 	if showChangelog {
 		m.mode = modeChangelogLatest
@@ -340,6 +353,7 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.editField = 0
 		m.editCursorPos = 0
 		m.editBodyOffset = 0
+		m.selField = -1
 
 	case "e":
 		if len(m.filteredNotes) > 0 {
@@ -352,6 +366,7 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.editField = 1
 			m.editCursorPos = utf8.RuneCountInString(n.Body)
 			m.editBodyOffset = 0
+			m.selField = -1
 		}
 
 	case "d", "delete":
@@ -443,6 +458,7 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.editField = 1
 			m.editCursorPos = utf8.RuneCountInString(n.Body)
 			m.editBodyOffset = 0
+			m.selField = -1
 		}
 
 	case "d":
@@ -492,6 +508,13 @@ func (m Model) handleDetailKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // ── Editor mode keys ─────────────────────────────────────────────────────────
 
 func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Snapshot any active word highlight before clearing it: ctrl+b/ctrl+u
+	// consume it below (wrapping the highlighted word) if that's what this
+	// key turns out to be. Every other key just drops it — there's no
+	// click-and-type replace-selection behavior beyond that.
+	selField, selStart, selEnd := m.selField, m.selStart, m.selEnd
+	m.selField = -1
+
 	switch msg.String() {
 	case "esc":
 		m.mode = modeList
@@ -527,15 +550,25 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case "ctrl+b":
-		// Bold — body field only.
+		// Bold — body field only. Wraps a double-click-highlighted word if
+		// there is one, otherwise the empty-span cursor behavior.
 		if m.editField == 1 {
-			m.editBody = toggleWrap(m.editBody, &m.editCursorPos, "**")
+			if selField == 1 && selStart < selEnd {
+				m.editBody, m.editCursorPos = wrapSelection(m.editBody, selStart, selEnd, "**")
+			} else {
+				m.editBody = toggleWrap(m.editBody, &m.editCursorPos, "**")
+			}
 		}
 
 	case "ctrl+u":
-		// Italic — body field only.
+		// Italic — body field only. Wraps a double-click-highlighted word if
+		// there is one, otherwise the empty-span cursor behavior.
 		if m.editField == 1 {
-			m.editBody = toggleWrap(m.editBody, &m.editCursorPos, "_")
+			if selField == 1 && selStart < selEnd {
+				m.editBody, m.editCursorPos = wrapSelection(m.editBody, selStart, selEnd, "_")
+			} else {
+				m.editBody = toggleWrap(m.editBody, &m.editCursorPos, "_")
+			}
 		}
 
 	case "ctrl+t":
@@ -562,10 +595,193 @@ func (m Model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // ── Editor mouse click ───────────────────────────────────────────────────────
 
+// doubleClickWithin is the maximum gap between two presses at the same
+// character for the second one to count as a double-click.
+const doubleClickWithin = 400 * time.Millisecond
+
+// labelPrefixW is the visual width of the "Title: " / "Tags : " prefix that
+// precedes the first row of those fields.
+const labelPrefixW = 7
+
+// editorRow describes one on-screen row inside the editor panel.
+// field is -1 for decorative rows (separators) that don't belong to any
+// editable field and can't be clicked.
+type editorRow struct {
+	field    int    // 0 = title, 1 = body, 2 = tags; -1 = decorative
+	text     string // this row's rune content, unstyled (valid when field >= 0)
+	startPos int    // rune offset into the field's full text where this row begins
+}
+
+// editorFieldWidths derives, from the editor's full content width wrapW,
+// the wrap width for the title/tags fields (which share a row with a
+// 7-column label) and for the body field (which doesn't). Both reserve one
+// extra column beyond what the text itself needs so a cursor sitting right
+// after the last character of a maximally-wide row always has room to draw
+// without pushing that row's rendered width past wrapW — which would make
+// lipgloss's own word-wrap silently reflow it, throwing off every row
+// below. renderEditor and editorRows both call this so their notions of
+// where each row starts and ends can never drift apart.
+func editorFieldWidths(wrapW int) (labeledW, bodyW int) {
+	if wrapW < 1 {
+		wrapW = 1
+	}
+	labeledW = wrapW - labelPrefixW - 1
+	if labeledW < 1 {
+		labeledW = 1
+	}
+	bodyW = wrapW - 1
+	if bodyW < 1 {
+		bodyW = 1
+	}
+	return labeledW, bodyW
+}
+
+// editorRows lays out the title/body/tags fields into on-screen rows,
+// soft-wrapping each field to wrapW columns. It is the single source of
+// truth for the editor's geometry: both renderEditor (to know where to draw
+// the cursor and selection) and handleEditorClick (to invert a screen
+// position back into a field + rune offset) build off of it, so the two can
+// never drift out of sync the way raw-versus-wrapped row counting once did.
+func (m Model) editorRows(wrapW int) []editorRow {
+	fieldW, bodyW := editorFieldWidths(wrapW)
+
+	var rows []editorRow
+
+	titleLines, titleStarts := wrapWithOffsets(m.editTitle, fieldW)
+	for i, l := range titleLines {
+		rows = append(rows, editorRow{field: 0, text: l, startPos: titleStarts[i]})
+	}
+
+	rows = append(rows, editorRow{field: -1}) // separator
+	// "Body : " label sits on its own row; clicking it jumps to the body's start.
+	rows = append(rows, editorRow{field: 1, text: "", startPos: 0})
+
+	bodyLines, bodyStarts := wrapWithOffsets(m.editBody, bodyW)
+	for i, l := range bodyLines {
+		rows = append(rows, editorRow{field: 1, text: l, startPos: bodyStarts[i]})
+	}
+
+	rows = append(rows, editorRow{field: -1}) // separator
+
+	tagsLines, tagsStarts := wrapWithOffsets(m.editTags, fieldW)
+	for i, l := range tagsLines {
+		rows = append(rows, editorRow{field: 2, text: l, startPos: tagsStarts[i]})
+	}
+
+	return rows
+}
+
+// wrapWithOffsets soft-wraps text to fit within width runes per visual line,
+// breaking at spaces like a normal text editor and hard-breaking a single
+// word that's longer than width on its own. Alongside each visual line it
+// returns the rune offset into text where that line begins, so a screen
+// position can be mapped back to an exact cursor offset (and vice versa)
+// regardless of how the text happened to wrap.
+func wrapWithOffsets(text string, width int) (lines []string, starts []int) {
+	if width < 1 {
+		width = 1
+	}
+	runes := []rune(text)
+	n := len(runes)
+
+	pos := 0
+	for {
+		lineEnd := pos
+		for lineEnd < n && runes[lineEnd] != '\n' {
+			lineEnd++
+		}
+
+		segStart := pos
+		for {
+			remaining := lineEnd - segStart
+			if remaining <= width {
+				lines = append(lines, string(runes[segStart:lineEnd]))
+				starts = append(starts, segStart)
+				segStart = lineEnd
+				break
+			}
+
+			breakAt := segStart + width
+			scan := breakAt
+			for scan > segStart && runes[scan] != ' ' {
+				scan--
+			}
+			if scan == segStart {
+				scan = breakAt // no space to break on — hard break at width
+			}
+
+			lines = append(lines, string(runes[segStart:scan]))
+			starts = append(starts, segStart)
+
+			next := scan
+			if next < lineEnd && runes[next] == ' ' {
+				next++ // consume the space that caused the break
+			}
+			segStart = next
+		}
+
+		if lineEnd == n {
+			break
+		}
+		pos = lineEnd + 1 // skip the '\n'
+	}
+
+	return lines, starts
+}
+
+// fieldText returns the current text of the given editor field (0/1/2).
+func (m Model) fieldText(field int) string {
+	switch field {
+	case 0:
+		return m.editTitle
+	case 2:
+		return m.editTags
+	default:
+		return m.editBody
+	}
+}
+
+// isWordRune reports whether r counts as part of a "word" for double-click
+// selection purposes.
+func isWordRune(r rune) bool {
+	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+}
+
+// wordBoundsAt returns the rune-offset span [start, end) of the word
+// touching cursor position pos in text — checking the character right at
+// pos first, then the one just before it, so clicking anywhere inside or at
+// either edge of a word selects it. If neither side is a word character,
+// start == end and there is nothing to select.
+func wordBoundsAt(text string, pos int) (start, end int) {
+	runes := []rune(text)
+	n := len(runes)
+
+	i := pos
+	if i >= n || !isWordRune(runes[i]) {
+		i = pos - 1
+	}
+	if i < 0 || i >= n || !isWordRune(runes[i]) {
+		return pos, pos
+	}
+
+	start = i
+	for start > 0 && isWordRune(runes[start-1]) {
+		start--
+	}
+	end = i + 1
+	for end < n && isWordRune(runes[end]) {
+		end++
+	}
+	return start, end
+}
+
 // handleEditorClick repositions the editor cursor to the character that was
-// clicked. It translates screen coordinates into a (field, cursorPos) pair.
+// clicked, translating screen coordinates into a (field, cursorPos) pair via
+// editorRows. A second click on the same character within doubleClickWithin
+// selects (highlights) the whole word under it.
 func (m Model) handleEditorClick(mx, my int) (tea.Model, tea.Cmd) {
 	listW := max(22, m.width*30/100)
+	detailW := m.width - listW - 3
 
 	// Editor panel content origin on screen:
 	//   X = listW (list panel) + 1 (gap) + 1 (border) + 1 (padding)
@@ -575,77 +791,62 @@ func (m Model) handleEditorClick(mx, my int) (tea.Model, tea.Cmd) {
 
 	col := mx - contentOriginX
 	row := my - contentOriginY
-
 	if col < 0 || row < 0 {
 		return m, nil
 	}
 
-	// The label prefix "Title: " / "Tags : " occupies 7 visual columns.
-	const labelPrefixW = 7
+	wrapW := detailW - 2 // content columns available inside the border + padding
+	rows := m.editorRows(wrapW)
+	if row >= len(rows) {
+		return m, nil
+	}
+	r := rows[row]
+	if r.field == -1 {
+		return m, nil
+	}
 
-	bodyLines := strings.Split(m.editBody, "\n")
-	bodyLineCount := len(bodyLines)
+	// Every title/tags row (including wrapped continuation rows, which
+	// renderEditor pads to match) is drawn labelPrefixW columns in from the
+	// body's — body rows have no label of their own.
+	colInLine := col
+	if r.field != 1 {
+		colInLine -= labelPrefixW
+	}
+	if colInLine < 0 {
+		colInLine = 0
+	}
+	lineRuneCount := utf8.RuneCountInString(r.text)
+	if colInLine > lineRuneCount {
+		colInLine = lineRuneCount
+	}
+	pos := r.startPos + colInLine
 
-	// Editor content layout:
-	//   Row 0:                        Title: <title>
-	//   Row 1:                        ───────────────
-	//   Row 2:                        Body :
-	//   Rows 3 .. 3+bodyLineCount-1:  <body text>
-	//   Row 3+bodyLineCount:          ───────────────
-	//   Row 3+bodyLineCount+1:        Tags : <tags>
+	now := time.Now()
+	isDoubleClick := m.lastClickField == r.field &&
+		m.lastClickPos == pos &&
+		!m.lastClickAt.IsZero() &&
+		now.Sub(m.lastClickAt) <= doubleClickWithin
 
-	switch {
-	case row == 0:
-		// Click on title line.
-		m.editField = 0
-		pos := col - labelPrefixW
-		if pos < 0 {
-			pos = 0
+	m.editField = r.field
+	m.editCursorPos = pos
+
+	if isDoubleClick {
+		start, end := wordBoundsAt(m.fieldText(r.field), pos)
+		if start < end {
+			m.selField = r.field
+			m.selStart = start
+			m.selEnd = end
+			m.editCursorPos = end
 		}
-		runes := []rune(m.editTitle)
-		if pos > len(runes) {
-			pos = len(runes)
-		}
-		m.editCursorPos = pos
-
-	case row == 2:
-		// Click on "Body : " label → position at start of body.
-		m.editField = 1
-		m.editCursorPos = 0
-
-	case row >= 3 && row < 3+bodyLineCount:
-		// Click inside body text.
-		m.editField = 1
-		lineIdx := row - 3
-
-		// Sum rune lengths of all preceding lines (+1 for each '\n').
-		charPos := 0
-		for i := 0; i < lineIdx; i++ {
-			charPos += utf8.RuneCountInString(bodyLines[i]) + 1
-		}
-
-		colInLine := col
-		if colInLine < 0 {
-			colInLine = 0
-		}
-		lineRuneCount := utf8.RuneCountInString(bodyLines[lineIdx])
-		if colInLine > lineRuneCount {
-			colInLine = lineRuneCount
-		}
-		m.editCursorPos = charPos + colInLine
-
-	case row == 3+bodyLineCount+1:
-		// Click on tags line.
-		m.editField = 2
-		pos := col - labelPrefixW
-		if pos < 0 {
-			pos = 0
-		}
-		runes := []rune(m.editTags)
-		if pos > len(runes) {
-			pos = len(runes)
-		}
-		m.editCursorPos = pos
+		// Consume the pair so a third press starts a fresh double-click
+		// window instead of immediately re-triggering.
+		m.lastClickField = -1
+		m.lastClickAt = time.Time{}
+	} else {
+		m.selField = -1
+		m.lastClickField = r.field
+		m.lastClickPos = pos
+		m.lastClickAt = now
 	}
 
 	return m, nil
@@ -1050,9 +1251,9 @@ func handleTextInput(text string, cursorPos *int, msg tea.KeyMsg) string {
 // bold, "_" for italic), leaving the cursor between them so the next
 // keystrokes land inside the pair. If the cursor already sits directly
 // between an empty pair of the same marker, the pair is removed instead —
-// a quick way to undo an accidental press. There is no text-selection
-// concept in this editor, so unlike GUI editors this always operates on an
-// empty span rather than wrapping already-typed text.
+// a quick way to undo an accidental press. This is the empty-span path used
+// when there's no active word highlight to wrap instead — see wrapSelection
+// for that case.
 func toggleWrap(text string, cursorPos *int, marker string) string {
 	runes := []rune(text)
 	pos := *cursorPos
@@ -1077,6 +1278,32 @@ func toggleWrap(text string, cursorPos *int, marker string) string {
 	out = append(out, runes[pos:]...)
 	*cursorPos = pos + ml
 	return string(out)
+}
+
+// wrapSelection wraps the [start, end) rune span of text in a pair of
+// markers (e.g. "**" for bold, "_" for italic) — the double-click-highlight
+// counterpart to toggleWrap's empty-span behavior. It returns the modified
+// text and a cursor position placed right after the closing marker.
+func wrapSelection(text string, start, end int, marker string) (string, int) {
+	runes := []rune(text)
+	if start < 0 {
+		start = 0
+	}
+	if end > len(runes) {
+		end = len(runes)
+	}
+	if start >= end {
+		return text, end
+	}
+
+	mk := []rune(marker)
+	out := make([]rune, 0, len(runes)+2*len(mk))
+	out = append(out, runes[:start]...)
+	out = append(out, mk...)
+	out = append(out, runes[start:end]...)
+	out = append(out, mk...)
+	out = append(out, runes[end:]...)
+	return string(out), end + 2*len(mk)
 }
 
 // headingPrefixes maps heading level (0 = plain line) to its Markdown prefix.
@@ -1421,37 +1648,17 @@ func (m Model) renderDetail(w, h int) string {
 
 func (m Model) renderEditor(w, h int) string {
 	th := m.theme
-	innerW := w - 4
 
-	// ── helper: render a field with cursor if active ───────────────────────
-	renderField := func(text string, fieldIdx int, placeholder string) string {
-		runes := []rune(text)
-		if m.editField != fieldIdx {
-			s := string(runes)
-			if s == "" {
-				return th.DetailMeta.Render(placeholder)
-			}
-			return s
-		}
-		pos := m.editCursorPos
-		if pos > len(runes) {
-			pos = len(runes)
-		}
-		before := string(runes[:pos])
-		if pos < len(runes) {
-			ch := runes[pos]
-			if ch == '\n' {
-				// Cursor is on an empty line: show a space block then the newline
-				return before + th.Cursor.Render(" ") + "\n" + string(runes[pos+1:])
-			}
-			cur := th.Cursor.Render(string(ch))
-			after := string(runes[pos+1:])
-			return before + cur + after
-		}
-		return before + th.Cursor.Render(" ")
+	// wrapW must match handleEditorClick's notion of the content area
+	// exactly (same border + padding math) — editorRows, and the wrapping
+	// done here, are the two halves of a single layout that render and
+	// mouse-click handling both have to agree on.
+	wrapW := w - 2
+	if wrapW < 1 {
+		wrapW = 1
 	}
+	fieldW, bodyW := editorFieldWidths(wrapW)
 
-	// ── fields ────────────────────────────────────────────────────────────
 	titleActive := m.editField == 0
 	bodyActive := m.editField == 1
 	tagsActive := m.editField == 2
@@ -1469,26 +1676,100 @@ func (m Model) renderEditor(w, h int) string {
 		labelTags = th.EditorTitleLabel.Render("Tags ")
 	}
 
-	titleStr := renderField(m.editTitle, 0, "(title)")
-	bodyStr := renderField(m.editBody, 1, "(body)")
-	tagsStr := renderField(m.editTags, 2, "(comma-separated, e.g. work, ideas)")
+	// renderRow renders one visual row of a field: its text, plus the
+	// cursor (if the field is active and it falls on this row) and any
+	// active word-selection highlight that overlaps this row.
+	renderRow := func(rowText string, field, rowStart int) string {
+		runes := []rune(rowText)
+		n := len(runes)
 
-	sep := th.DetailMeta.Render(strings.Repeat("─", innerW))
+		cursorAt := -1
+		if m.editField == field {
+			cursorAt = m.editCursorPos - rowStart
+		}
+
+		selA, selB := -1, -1
+		if m.selField == field {
+			a, b := m.selStart-rowStart, m.selEnd-rowStart
+			if a < 0 {
+				a = 0
+			}
+			if b > n {
+				b = n
+			}
+			if a < b {
+				selA, selB = a, b
+			}
+		}
+
+		var out strings.Builder
+		for i := 0; i <= n; i++ {
+			if i == n {
+				if cursorAt == n {
+					out.WriteString(th.Cursor.Render(" "))
+				}
+				break
+			}
+			switch {
+			case cursorAt == i:
+				out.WriteString(th.Cursor.Render(string(runes[i])))
+			case selA >= 0 && i >= selA && i < selB:
+				out.WriteString(th.Selection.Render(string(runes[i])))
+			default:
+				out.WriteRune(runes[i])
+			}
+		}
+		return out.String()
+	}
+
+	// renderField soft-wraps text for the given field and renders each
+	// resulting row, or a styled placeholder when the field is empty and
+	// not focused.
+	renderField := func(text string, field int, placeholder string) []string {
+		if text == "" && m.editField != field {
+			return []string{th.DetailMeta.Render(placeholder)}
+		}
+		fw := bodyW
+		if field != 1 {
+			fw = fieldW
+		}
+		lines, starts := wrapWithOffsets(text, fw)
+		out := make([]string, len(lines))
+		for i, l := range lines {
+			out[i] = renderRow(l, field, starts[i])
+		}
+		return out
+	}
+
+	titleRows := renderField(m.editTitle, 0, "(title)")
+	bodyRows := renderField(m.editBody, 1, "(body)")
+	tagsRows := renderField(m.editTags, 2, "(comma-separated, e.g. work, ideas)")
+
+	// Continuation rows of a wrapped title/tags field have no label of
+	// their own — pad them to the same column the label pushes row 0 to.
+	blankLabel := strings.Repeat(" ", labelPrefixW)
+	titleRows[0] = lipgloss.JoinHorizontal(lipgloss.Top, labelTitle, ": ", titleRows[0])
+	for i := 1; i < len(titleRows); i++ {
+		titleRows[i] = blankLabel + titleRows[i]
+	}
+	tagsRows[0] = lipgloss.JoinHorizontal(lipgloss.Top, labelTags, ": ", tagsRows[0])
+	for i := 1; i < len(tagsRows); i++ {
+		tagsRows[i] = blankLabel + tagsRows[i]
+	}
+
+	sep := th.DetailMeta.Render(strings.Repeat("─", wrapW))
 	hint := th.DetailMeta.Render("tab: next field  ·  ctrl+b: bold  ·  ctrl+u: italic  ·  ctrl+t: heading  ·  ctrl+s: save  ·  ctrl+w: save & view  ·  esc: cancel")
 
-	titleLine := lipgloss.JoinHorizontal(lipgloss.Top, labelTitle, ": ", titleStr)
-	tagsLine := lipgloss.JoinHorizontal(lipgloss.Top, labelTags, ": ", tagsStr)
+	lines := make([]string, 0, len(titleRows)+len(bodyRows)+len(tagsRows)+6)
+	lines = append(lines, titleRows...)
+	lines = append(lines, sep)
+	lines = append(lines, lipgloss.JoinHorizontal(lipgloss.Top, labelBody, ": "))
+	lines = append(lines, bodyRows...)
+	lines = append(lines, sep)
+	lines = append(lines, tagsRows...)
+	lines = append(lines, "", hint)
 
-	content := strings.Join([]string{
-		titleLine,
-		sep,
-		lipgloss.JoinHorizontal(lipgloss.Top, labelBody, ": "),
-		bodyStr,
-		sep,
-		tagsLine,
-		"",
-		hint,
-	}, "\n")
+	content := strings.Join(lines, "\n")
 
 	return th.EditorPanel.Width(w).Height(h).Render(content)
 }
@@ -1533,6 +1814,9 @@ func (m Model) renderStatus() string {
 		fieldName := []string{"title", "body", "tags"}[m.editField]
 		keys := []string{
 			th.StatusKey.Render("tab") + " next field",
+			th.StatusKey.Render("ctrl+b") + " bold",
+			th.StatusKey.Render("ctrl+u") + " italic",
+			th.StatusKey.Render("ctrl+t") + " heading",
 			th.StatusKey.Render("ctrl+s") + " save",
 			th.StatusKey.Render("esc") + " cancel",
 			th.DetailMeta.Render("editing: ") + th.StatusKey.Render(fieldName),

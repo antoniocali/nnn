@@ -38,6 +38,7 @@ type Theme struct {
 	EditorTitleLabel lipgloss.Style
 	EditorBodyLabel  lipgloss.Style
 	Cursor           lipgloss.Style
+	Selection        lipgloss.Style
 
 	// ── Status bar ──────────────────────────────────────────────────────────
 	StatusBar lipgloss.Style
@@ -165,6 +166,9 @@ func newTheme(name string, p palette, glamourStyle string) Theme {
 		Cursor: lipgloss.NewStyle().
 			Background(p.accent).
 			Foreground(p.bg),
+		Selection: lipgloss.NewStyle().
+			Background(p.selected).
+			Foreground(p.selectedFg),
 
 		// Status bar
 		StatusBar: lipgloss.NewStyle().
