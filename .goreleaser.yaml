@@ -97,13 +97,18 @@ homebrew_casks:
     skip_upload: auto
     binaries:
       - nnn
-    # Remove macOS quarantine bit since binary is not notarized
-    hooks:
-      post:
-        install: |
-          if OS.mac?
-            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/nnn"]
-          end
+    # Remove macOS quarantine bit since binary is not notarized.
+    # Homebrew 7 deprecated the postflight block in favor of postflight_steps.
+    # goreleaser doesn't support the new syntax natively yet
+    # (see goreleaser/goreleaser#6870), so it's written via custom_block
+    # until that lands. The double-mustache dance avoids goreleaser's own
+    # templater trying to resolve `{{staged_path}}` as one of its fields.
+    custom_block: |
+      postflight_steps do
+        on_macos do
+          run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{"{{staged_path}}"}}/nnn"]
+        end
+      end
 
 # GitHub Releases
 release:
